@@ -193,27 +193,33 @@ def act(stuff, unused ):
 
 
 class RNN(nn.Module):
+    """
+    Simple RNN model with optional dense layers before the GRU cell.
+
+    Attributes:
+    - num_outputs: Number of output units.
+    - num_hidden_units: Number of hidden units.
+    - layers_before_gru: Number of dense layers before the GRU cell.
+    """
     num_outputs: int
     num_hidden_units: int
     layers_before_gru: int
 
     def setup(self):
-        if self.layers_before_gru >= 1:
-            self.linear1 = nn.Dense(features=self.num_hidden_units)
-        if self.layers_before_gru >= 2:
-            self.linear2 = nn.Dense(features=self.num_hidden_units)
-            # Right now only supports 1 or 2, obviously can add more. Also obviously can put into a list
-        # and use a loop
+        # Define dense layers before GRU
+        self.linears = [nn.Dense(features=self.num_hidden_units) for _ in range(self.layers_before_gru)]
         self.GRUCell = nn.GRUCell()
         self.linear_end = nn.Dense(features=self.num_outputs)
 
     def __call__(self, x, carry):
-        if self.layers_before_gru >= 1:
-            x = self.linear1(x)
-            x = nn.relu(x)
-        if self.layers_before_gru >= 2:
-            x = self.linear2(x)
+        # Pass through dense layers
+        for i, linear in enumerate(self.linears):
+            x = linear(x)
+            if i < len(self.linears) - 1:  # Only apply ReLU if it's not the last layer
+                x = nn.relu(x)
 
+
+        # Pass through GRU cell
         carry, x = self.GRUCell(carry, x)
         outputs = self.linear_end(x)
         return carry, outputs
