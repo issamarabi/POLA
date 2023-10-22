@@ -203,7 +203,7 @@ class RNN(nn.Module):
         if self.layers_before_gru >= 2:
             self.linear2 = nn.Dense(features=self.num_hidden_units)
             # Right now only supports 1 or 2, obviously can add more. Also obviously can put into a list
-            # and use a loop
+        # and use a loop
         self.GRUCell = nn.GRUCell()
         self.linear_end = nn.Dense(features=self.num_outputs)
 
@@ -1399,55 +1399,55 @@ def eval_progress(subkey, trainstate_th1, trainstate_val1, trainstate_th2, train
 
 
 def get_init_trainstates(key, action_size, input_size):
+    """
+    Initialize the training states for two agents.
+    
+    Args:
+    - key: Random seed.
+    - action_size: Number of possible actions.
+    - input_size: Size of the input.
+    
+    Returns:
+    - Tuple of training states for the two agents.
+    """
     hidden_size = args.hidden_size
-
     key, key_p1, key_v1, key_p2, key_v2 = jax.random.split(key, 5)
 
-    theta_p1 = RNN(num_outputs=action_size,
-                   num_hidden_units=hidden_size,
-                   layers_before_gru=args.layers_before_gru)
-    theta_v1 = RNN(num_outputs=1, num_hidden_units=hidden_size,
-                   layers_before_gru=args.layers_before_gru)
+    # Initialize RNNs for the two agents
+    def init_rnn(key_p, key_v):
+        theta_p = RNN(num_outputs=action_size,
+                      num_hidden_units=hidden_size,
+                      layers_before_gru=args.layers_before_gru)
+        theta_v = RNN(num_outputs=1, num_hidden_units=hidden_size,
+                      layers_before_gru=args.layers_before_gru)
 
-    theta_p1_params = theta_p1.init(key_p1, jnp.ones(
-        [args.batch_size, input_size]), jnp.zeros(hidden_size))
-    theta_v1_params = theta_v1.init(key_v1, jnp.ones(
-        [args.batch_size, input_size]), jnp.zeros(hidden_size))
+        theta_p_params = theta_p.init(key_p, jnp.ones([args.batch_size, input_size]), jnp.zeros(hidden_size))
+        theta_v_params = theta_v.init(key_v, jnp.ones([args.batch_size, input_size]), jnp.zeros(hidden_size))
 
-    theta_p2 = RNN(num_outputs=action_size,
-                   num_hidden_units=hidden_size,
-                   layers_before_gru=args.layers_before_gru)
-    theta_v2 = RNN(num_outputs=1, num_hidden_units=hidden_size,
-                   layers_before_gru=args.layers_before_gru)
+        return theta_p, theta_p_params, theta_v, theta_v_params
 
-    theta_p2_params = theta_p2.init(key_p2, jnp.ones(
-        [args.batch_size, input_size]), jnp.zeros(hidden_size))
-    theta_v2_params = theta_v2.init(key_v2, jnp.ones(
-        [args.batch_size, input_size]), jnp.zeros(hidden_size))
+    theta_p1, theta_p1_params, theta_v1, theta_v1_params = init_rnn(key_p1, key_v1)
+    theta_p2, theta_p2_params, theta_v2, theta_v2_params = init_rnn(key_p2, key_v2)
 
-    if args.optim.lower() == 'adam':
-        theta_optimizer = optax.adam(learning_rate=args.lr_out)
-        value_optimizer = optax.adam(learning_rate=args.lr_v)
-    elif args.optim.lower() == 'sgd':
-        theta_optimizer = optax.sgd(learning_rate=args.lr_out)
-        value_optimizer = optax.sgd(learning_rate=args.lr_v)
-    else:
+    # Choose optimizer
+    optimizers = {
+        'adam': optax.adam(learning_rate=args.lr_out),
+        'sgd': optax.sgd(learning_rate=args.lr_out)
+    }
+    theta_optimizer = optimizers.get(args.optim.lower())
+    value_optimizer = optimizers.get(args.optim.lower(), optax.sgd(learning_rate=args.lr_v))
+
+    if not theta_optimizer:
         raise Exception("Unknown or Not Implemented Optimizer")
 
-    trainstate_th1 = TrainState.create(apply_fn=theta_p1.apply,
-                                       params=theta_p1_params,
-                                       tx=theta_optimizer)
-    trainstate_val1 = TrainState.create(apply_fn=theta_v1.apply,
-                                        params=theta_v1_params,
-                                        tx=value_optimizer)
-    trainstate_th2 = TrainState.create(apply_fn=theta_p2.apply,
-                                       params=theta_p2_params,
-                                       tx=theta_optimizer)
-    trainstate_val2 = TrainState.create(apply_fn=theta_v2.apply,
-                                        params=theta_v2_params,
-                                        tx=value_optimizer)
+    # Create training states
+    trainstate_th1 = TrainState.create(apply_fn=theta_p1.apply, params=theta_p1_params, tx=theta_optimizer)
+    trainstate_val1 = TrainState.create(apply_fn=theta_v1.apply, params=theta_v1_params, tx=value_optimizer)
+    trainstate_th2 = TrainState.create(apply_fn=theta_p2.apply, params=theta_p2_params, tx=theta_optimizer)
+    trainstate_val2 = TrainState.create(apply_fn=theta_v2.apply, params=theta_v2_params, tx=value_optimizer)
 
     return trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2
+
 
 
 @jit
@@ -2002,70 +2002,75 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Seed Initialization
     np.random.seed(args.seed)
 
-
-
+    # Environment Setup
     if args.env == 'coin':
-        assert args.grid_size == 3  # rest not implemented yet
+        assert args.grid_size == 3  #  not implemented yet
         input_size = args.grid_size ** 2 * 4
         action_size = 4
         env = CoinGame()
     elif args.env == 'ipd':
-        input_size = 6 # 3 * n_agents
+        input_size = 6  # 3 * n_agents
         action_size = 2
         env = IPD(init_state_coop=args.init_state_coop, contrib_factor=args.contrib_factor)
     else:
         raise NotImplementedError("unknown env")
+
     vec_env_reset = jax.vmap(env.reset)
     vec_env_step = jax.vmap(env.step)
 
-
-
+    # Key Initialization
     key = jax.random.PRNGKey(args.seed)
 
-
+    # Training State Initialization
     trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2 = get_init_trainstates(key, action_size, input_size)
 
-
-    if args.load_dir is not None:
+    # Restore Checkpoints (if provided)
+    if args.load_dir:
         epoch_num = int(args.load_prefix.split("epoch")[-1])
+        
+        # Temporary fix for updated checkpointing system
         if epoch_num % 10 == 0:
-            epoch_num += 1  # Kind of an ugly temporary fix to allow for the updated checkpointing system which now has
-            # record of rewards/eval vs fixed strat before the first training - important for IPD plots. Should really be applied to
-            # all checkpoints with the new updated code I have, but the coin checkpoints above are from old code
+            epoch_num += 1
 
+        # Initialize score records
         score_record = [jnp.zeros((2,))] * epoch_num
-        vs_fixed_strats_score_record = [[jnp.zeros((3,))] * epoch_num,
-                                        [jnp.zeros((3,))] * epoch_num]
+        vs_fixed_strats_score_record = [[jnp.zeros((3,))] * epoch_num, [jnp.zeros((3,))] * epoch_num]
+        
+        # Initialize coin collection records based on environment
         if args.env == 'coin':
             same_colour_coins_record = [jnp.zeros((1,))] * epoch_num
             diff_colour_coins_record = [jnp.zeros((1,))] * epoch_num
         else:
             same_colour_coins_record = []
             diff_colour_coins_record = []
-        coins_collected_info = (
-            same_colour_coins_record, diff_colour_coins_record)
+        
+        coins_collected_info = (same_colour_coins_record, diff_colour_coins_record)
 
+        # Ensure a load prefix is provided
         assert args.load_prefix is not None
-        restored_tuple = checkpoints.restore_checkpoint(ckpt_dir=args.load_dir,
-                                                        target=(trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2,
-                                                                coins_collected_info,
-                                                                score_record,
-                                                                vs_fixed_strats_score_record),
-                                                        prefix=args.load_prefix)
+        
+        # Restore checkpoint
+        restored_tuple = checkpoints.restore_checkpoint(
+            ckpt_dir=args.load_dir,
+            target=(trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2,
+                    coins_collected_info, score_record, vs_fixed_strats_score_record),
+            prefix=args.load_prefix
+        )
 
+        # Unpack restored tuple
         trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, coins_collected_info, score_record, vs_fixed_strats_score_record = restored_tuple
 
 
-    use_baseline = True
-    if args.no_baseline:
-        use_baseline = False
+    # Baseline Setup
+    use_baseline = not args.no_baseline
 
+    # Sanity Checks
     assert args.inner_steps >= 1
-    # Use 0 lr if you want no inner steps... TODO allow for 0 inner steps? Might save computation for naive learning instead of 0 lr
     assert args.outer_steps >= 1
 
+    # Execute the Play Function
+    joint_scores = play(key, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, args.opp_model)
 
-    joint_scores = play(key, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2,
-                        args.opp_model)

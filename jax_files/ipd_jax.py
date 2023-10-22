@@ -1,6 +1,6 @@
 import jax.numpy as jnp
 
-class IteratedPrisonersDilemma:
+class IPD:
     """
     A two-agent vectorized environment for the Iterated Prisoner's Dilemma (IPD).
     Possible actions for each agent are (C)ooperate and (D)efect.
