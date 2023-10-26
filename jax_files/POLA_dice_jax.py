@@ -1748,10 +1748,8 @@ def play(key, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, 
 
     for update in range(args.n_update):
         # THESE SHOULD NOT BE UPDATED (they are reset only on each new update step e.g. epoch, after all the outer and inner steps)
-        trainstate_th1_ref = create_trainstate(trainstate_th1)
-        trainstate_val1_ref = create_trainstate(trainstate_val1)
-        trainstate_th2_ref = create_trainstate(trainstate_th2)
-        trainstate_val2_ref = create_trainstate(trainstate_val2)
+        trainstate_th1_ref, trainstate_val1_ref = create_trainstate(trainstate_th1), create_trainstate(trainstate_val1)
+        trainstate_th2_ref, trainstate_val2_ref = create_trainstate(trainstate_th2), create_trainstate(trainstate_val2)
 
 
         # --- AGENT 1 UPDATE ---
@@ -1782,10 +1780,8 @@ def play(key, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, 
         # --- START OF AGENT 2 UPDATE ---
 
         # Doing this just as a safety failcase scenario, to make sure each agent loop starts from the beginning
-        trainstate_th1_copy = create_trainstate(trainstate_th1)
-        trainstate_val1_copy = create_trainstate(trainstate_val1)
-        trainstate_th2_copy = create_trainstate(trainstate_th2)
-        trainstate_val2_copy = create_trainstate(trainstate_val2)
+        trainstate_th1_copy, trainstate_val1_copy = create_trainstate(trainstate_th1), create_trainstate(trainstate_val1)
+        trainstate_th2_copy, trainstate_val2_copy = create_trainstate(trainstate_th2), create_trainstate(trainstate_val2)
 
 
         if args.opp_model:
@@ -1811,7 +1807,6 @@ def play(key, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, 
         trainstate_after_outer_steps_th2 = create_trainstate(trainstate_th2_copy)
         trainstate_after_outer_steps_val2 = create_trainstate(trainstate_val2_copy)
 
-        # TODO ensure this is correct. Ensure that the copy is updated on the outer loop once that has finished.
         # Note that this is updated only after all the outer loop steps have finished. the copies are
         # updated during the outer loops. But the main trainstate (like the main th) is updated only
         # after the loops finish
