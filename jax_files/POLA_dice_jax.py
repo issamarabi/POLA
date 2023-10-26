@@ -1701,34 +1701,29 @@ def opp_model_selfagent2(key, true_other_trainstate_th, true_other_trainstate_va
     return om_trainstate_th, om_trainstate_val
 
 
+########################################################################################################################
+######################################## HELPER FUNCTIONS FOR PLAY ######################################################
+########################################################################################################################
 
-def play(key, init_trainstate_th1, init_trainstate_val1, init_trainstate_th2, init_trainstate_val2, use_opp_model=False):
+def create_trainstate(trainstate):
+    return TrainState.create(
+        apply_fn=trainstate.apply_fn,
+        params=trainstate.params,
+        tx=trainstate.tx
+    )
+
+########################################################################################################################
+
+def play(key, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, use_opp_model=False):
     joint_scores = []
     score_record = []
-    # You could do something like the below and then modify the code to just be one continuous record that includes past values when loading from checkpoint
-    # if prev_scores is not None:
-    #     score_record = prev_scores
-    # I'm tired though.
     vs_fixed_strats_score_record = [[], []]
-
-    print("start iterations with", args.inner_steps, "inner steps and", args.outer_steps, "outer steps:")
     same_colour_coins_record = []
     diff_colour_coins_record = []
     coins_collected_info = (same_colour_coins_record, diff_colour_coins_record)
 
-    # Pretty sure this creation is unnecessary and we can directly use the trainstates passed in
-    trainstate_th1 = TrainState.create(apply_fn=init_trainstate_th1.apply_fn,
-                                       params=init_trainstate_th1.params,
-                                       tx=init_trainstate_th1.tx)
-    trainstate_val1 = TrainState.create(apply_fn=init_trainstate_val1.apply_fn,
-                                        params=init_trainstate_val1.params,
-                                        tx=init_trainstate_val1.tx)
-    trainstate_th2 = TrainState.create(apply_fn=init_trainstate_th2.apply_fn,
-                                       params=init_trainstate_th2.params,
-                                       tx=init_trainstate_th2.tx)
-    trainstate_val2 = TrainState.create(apply_fn=init_trainstate_val2.apply_fn,
-                                        params=init_trainstate_val2.params,
-                                        tx=init_trainstate_val2.tx)
+    print("start iterations with", args.inner_steps, "inner steps and", args.outer_steps, "outer steps:")
+
 
     if args.opp_model:
         key, subkey = jax.random.split(key)
@@ -1737,8 +1732,7 @@ def play(key, init_trainstate_th1, init_trainstate_val1, init_trainstate_th2, in
 
     key, subkey = jax.random.split(key)
     score1, score2, rr_matches_amount, rb_matches_amount, br_matches_amount, bb_matches_amount, score1rec, score2rec = \
-        eval_progress(key, trainstate_th1, trainstate_val1, trainstate_th2,
-                      trainstate_val2)
+        eval_progress(key, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2)
 
     if args.env == "coin":
         same_colour_coins = rr_matches_amount + bb_matches_amount
@@ -1753,44 +1747,19 @@ def play(key, init_trainstate_th1, init_trainstate_val1, init_trainstate_th2, in
 
 
     for update in range(args.n_update):
-        # TODO there may be redundancy here (as in many places in this code...), consider clean up later
         # THESE SHOULD NOT BE UPDATED (they are reset only on each new update step e.g. epoch, after all the outer and inner steps)
-        trainstate_th1_ref = TrainState.create(
-            apply_fn=trainstate_th1.apply_fn,
-            params=trainstate_th1.params,
-            tx=trainstate_th1.tx)
-        trainstate_val1_ref = TrainState.create(
-            apply_fn=trainstate_val1.apply_fn,
-            params=trainstate_val1.params,
-            tx=trainstate_val1.tx)
-        trainstate_th2_ref = TrainState.create(
-            apply_fn=trainstate_th2.apply_fn,
-            params=trainstate_th2.params,
-            tx=trainstate_th2.tx)
-        trainstate_val2_ref = TrainState.create(
-            apply_fn=trainstate_val2.apply_fn,
-            params=trainstate_val2.params,
-            tx=trainstate_val2.tx)
+        trainstate_th1_ref = create_trainstate(trainstate_th1)
+        trainstate_val1_ref = create_trainstate(trainstate_val1)
+        trainstate_th2_ref = create_trainstate(trainstate_th2)
+        trainstate_val2_ref = create_trainstate(trainstate_val2)
 
 
         # --- AGENT 1 UPDATE ---
 
-        trainstate_th1_copy = TrainState.create(
-            apply_fn=trainstate_th1.apply_fn,
-            params=trainstate_th1.params,
-            tx=trainstate_th1.tx)
-        trainstate_val1_copy = TrainState.create(
-            apply_fn=trainstate_val1.apply_fn,
-            params=trainstate_val1.params,
-            tx=trainstate_val1.tx)
-        trainstate_th2_copy = TrainState.create(
-            apply_fn=trainstate_th2.apply_fn,
-            params=trainstate_th2.params,
-            tx=trainstate_th2.tx)
-        trainstate_val2_copy = TrainState.create(
-            apply_fn=trainstate_val2.apply_fn,
-            params=trainstate_val2.params,
-            tx=trainstate_val2.tx)
+        trainstate_th1_copy = create_trainstate(trainstate_th1)
+        trainstate_val1_copy = create_trainstate(trainstate_val1)
+        trainstate_th2_copy = create_trainstate(trainstate_th2)
+        trainstate_val2_copy = create_trainstate(trainstate_val2)
 
         if args.opp_model:
             key, subkey = jax.random.split(key)
@@ -1798,16 +1767,8 @@ def play(key, init_trainstate_th1, init_trainstate_val1, init_trainstate_th2, in
                                  trainstate_th2_copy, trainstate_val2_copy, agent1_om_of_th2, agent1_om_of_val2)
             # No need to overwrite the refs for agent 2 because those aren't used in the outer loop as we're using KL div for agent 1
             # The inner KL div is done in the inner loop which will automatically recreate/save the ref before each set of inner loop steps
-            trainstate_th2_copy = TrainState.create(
-                apply_fn=agent1_om_of_th2.apply_fn,
-                params=agent1_om_of_th2.params,
-                tx=agent1_om_of_th2.tx)
-            trainstate_val2_copy = TrainState.create(
-                apply_fn=agent1_om_of_val2.apply_fn,
-                params=agent1_om_of_val2.params,
-                tx=agent1_om_of_val2.tx)
-
-        # val update after loop no longer seems necessary
+            trainstate_th2_copy = create_trainstate(agent1_om_of_th2)
+            trainstate_val2_copy = create_trainstate(agent1_om_of_val2)
 
         key, subkey = jax.random.split(key)
 
@@ -1818,35 +1779,13 @@ def play(key, init_trainstate_th1, init_trainstate_val1, init_trainstate_th2, in
         stuff, aux = jax.lax.scan(one_outer_step_update_selfagent1, stuff, None, args.outer_steps)
         _, trainstate_th1_copy, trainstate_val1_copy, _, _, _, _ = stuff
 
-        # Doing this just as a safety failcase scenario, and copy this at the end
-        trainstate_after_outer_steps_th1 = TrainState.create(
-            apply_fn=trainstate_th1_copy.apply_fn,
-            params=trainstate_th1_copy.params,
-            tx=trainstate_th1_copy.tx)
-        trainstate_after_outer_steps_val1 = TrainState.create(
-            apply_fn=trainstate_val1_copy.apply_fn,
-            params=trainstate_val1_copy.params,
-            tx=trainstate_val1_copy.tx)
-
         # --- START OF AGENT 2 UPDATE ---
 
         # Doing this just as a safety failcase scenario, to make sure each agent loop starts from the beginning
-        trainstate_th1_copy = TrainState.create(
-            apply_fn=trainstate_th1.apply_fn,
-            params=trainstate_th1.params,
-            tx=trainstate_th1.tx)
-        trainstate_val1_copy = TrainState.create(
-            apply_fn=trainstate_val1.apply_fn,
-            params=trainstate_val1.params,
-            tx=trainstate_val1.tx)
-        trainstate_th2_copy = TrainState.create(
-            apply_fn=trainstate_th2.apply_fn,
-            params=trainstate_th2.params,
-            tx=trainstate_th2.tx)
-        trainstate_val2_copy = TrainState.create(
-            apply_fn=trainstate_val2.apply_fn,
-            params=trainstate_val2.params,
-            tx=trainstate_val2.tx)
+        trainstate_th1_copy = create_trainstate(trainstate_th1)
+        trainstate_val1_copy = create_trainstate(trainstate_val1)
+        trainstate_th2_copy = create_trainstate(trainstate_th2)
+        trainstate_val2_copy = create_trainstate(trainstate_val2)
 
 
         if args.opp_model:
@@ -1855,14 +1794,8 @@ def play(key, init_trainstate_th1, init_trainstate_val1, init_trainstate_th2, in
                                  trainstate_th2_copy, trainstate_val2_copy, agent2_om_of_th1, agent2_om_of_val1)
             # No need to overwrite the refs for agent 1 because those aren't used in the outer loop as we're using KL div for agent 2
             # The inner KL div is done in the inner loop which will automatically recreate/save the ref before each set of inner loop steps
-            trainstate_th1_copy = TrainState.create(
-                apply_fn=agent2_om_of_th1.apply_fn,
-                params=agent2_om_of_th1.params,
-                tx=agent2_om_of_th1.tx)
-            trainstate_val1_copy = TrainState.create(
-                apply_fn=agent2_om_of_val1.apply_fn,
-                params=agent2_om_of_val1.params,
-                tx=agent2_om_of_val1.tx)
+            trainstate_th1_copy = create_trainstate(agent2_om_of_th1)
+            trainstate_val1_copy = create_trainstate(agent2_om_of_val1)
 
 
         key, subkey = jax.random.split(key)
@@ -1875,15 +1808,8 @@ def play(key, init_trainstate_th1, init_trainstate_val1, init_trainstate_th2, in
                                   args.outer_steps)
         _, _, _, trainstate_th2_copy, trainstate_val2_copy, _, _ = stuff
 
-        trainstate_after_outer_steps_th2 = TrainState.create(
-            apply_fn=trainstate_th2_copy.apply_fn,
-            params=trainstate_th2_copy.params,
-            tx=trainstate_th2_copy.tx)
-        trainstate_after_outer_steps_val2 = TrainState.create(
-            apply_fn=trainstate_val2_copy.apply_fn,
-            params=trainstate_val2_copy.params,
-            tx=trainstate_val2_copy.tx)
-
+        trainstate_after_outer_steps_th2 = create_trainstate(trainstate_th2_copy)
+        trainstate_after_outer_steps_val2 = create_trainstate(trainstate_val2_copy)
 
         # TODO ensure this is correct. Ensure that the copy is updated on the outer loop once that has finished.
         # Note that this is updated only after all the outer loop steps have finished. the copies are
@@ -1932,8 +1858,7 @@ def play(key, init_trainstate_th1, init_trainstate_val1, init_trainstate_th2, in
             print(score1rec)
             print(score2rec)
 
-            if args.env == 'ipd':
-                if args.inspect_ipd:
+            if args.env == 'ipd' and args.inspect_ipd:
                     inspect_ipd(trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2)
 
         if (update + 1) % args.checkpoint_every == 0:
