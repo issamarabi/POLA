@@ -1705,7 +1705,7 @@ def opp_model_selfagent2(key, true_other_trainstate_th, true_other_trainstate_va
 ######################################## HELPER FUNCTIONS FOR PLAY ######################################################
 ########################################################################################################################
 
-def create_trainstate(trainstate):
+def copyTrainState(trainstate):
     return TrainState.create(
         apply_fn=trainstate.apply_fn,
         params=trainstate.params,
@@ -1715,12 +1715,13 @@ def create_trainstate(trainstate):
 ########################################################################################################################
 
 def play(key, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, use_opp_model=False):
-    joint_scores = []
-    score_record = []
-    vs_fixed_strats_score_record = [[], []]
-    same_colour_coins_record = []
-    diff_colour_coins_record = []
+    joint_scores = []  # combined scores of both agents after each update
+    score_record = []  # individual scores of agents after each update
+    vs_fixed_strategies_scores = [[], []]  # scores of agents against fixed strategies
+    same_colour_coins_record = []  # counts of same-color coins collected in the "coin" environment
+    diff_colour_coins_record = []  # counts of different-color coins collected in the "coin" environment
     coins_collected_info = (same_colour_coins_record, diff_colour_coins_record)
+
 
     print("start iterations with", args.inner_steps, "inner steps and", args.outer_steps, "outer steps:")
 
@@ -1740,24 +1741,24 @@ def play(key, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, 
         same_colour_coins_record.append(same_colour_coins)
         diff_colour_coins_record.append(diff_colour_coins)
 
-    vs_fixed_strats_score_record[0].append(score1rec)
-    vs_fixed_strats_score_record[1].append(score2rec)
+    vs_fixed_strategies_scores[0].append(score1rec)
+    vs_fixed_strategies_scores[1].append(score2rec)
 
     score_record.append(jnp.stack((score1, score2)))
 
 
     for update in range(args.n_update):
         # THESE SHOULD NOT BE UPDATED (they are reset only on each new update step e.g. epoch, after all the outer and inner steps)
-        trainstate_th1_ref, trainstate_val1_ref = create_trainstate(trainstate_th1), create_trainstate(trainstate_val1)
-        trainstate_th2_ref, trainstate_val2_ref = create_trainstate(trainstate_th2), create_trainstate(trainstate_val2)
+        trainstate_th1_ref, trainstate_val1_ref = copyTrainState(trainstate_th1), copyTrainState(trainstate_val1)
+        trainstate_th2_ref, trainstate_val2_ref = copyTrainState(trainstate_th2), copyTrainState(trainstate_val2)
 
 
         # --- AGENT 1 UPDATE ---
 
-        trainstate_th1_copy = create_trainstate(trainstate_th1)
-        trainstate_val1_copy = create_trainstate(trainstate_val1)
-        trainstate_th2_copy = create_trainstate(trainstate_th2)
-        trainstate_val2_copy = create_trainstate(trainstate_val2)
+        trainstate_th1_copy = copyTrainState(trainstate_th1)
+        trainstate_val1_copy = copyTrainState(trainstate_val1)
+        trainstate_th2_copy = copyTrainState(trainstate_th2)
+        trainstate_val2_copy = copyTrainState(trainstate_val2)
 
         if args.opp_model:
             key, subkey = jax.random.split(key)
@@ -1765,8 +1766,8 @@ def play(key, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, 
                                  trainstate_th2_copy, trainstate_val2_copy, agent1_om_of_th2, agent1_om_of_val2)
             # No need to overwrite the refs for agent 2 because those aren't used in the outer loop as we're using KL div for agent 1
             # The inner KL div is done in the inner loop which will automatically recreate/save the ref before each set of inner loop steps
-            trainstate_th2_copy = create_trainstate(agent1_om_of_th2)
-            trainstate_val2_copy = create_trainstate(agent1_om_of_val2)
+            trainstate_th2_copy = copyTrainState(agent1_om_of_th2)
+            trainstate_val2_copy = copyTrainState(agent1_om_of_val2)
 
         key, subkey = jax.random.split(key)
 
@@ -1780,8 +1781,8 @@ def play(key, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, 
         # --- START OF AGENT 2 UPDATE ---
 
         # Doing this just as a safety failcase scenario, to make sure each agent loop starts from the beginning
-        trainstate_th1_copy, trainstate_val1_copy = create_trainstate(trainstate_th1), create_trainstate(trainstate_val1)
-        trainstate_th2_copy, trainstate_val2_copy = create_trainstate(trainstate_th2), create_trainstate(trainstate_val2)
+        trainstate_th1_copy, trainstate_val1_copy = copyTrainState(trainstate_th1), copyTrainState(trainstate_val1)
+        trainstate_th2_copy, trainstate_val2_copy = copyTrainState(trainstate_th2), copyTrainState(trainstate_val2)
 
 
         if args.opp_model:
@@ -1790,8 +1791,8 @@ def play(key, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, 
                                  trainstate_th2_copy, trainstate_val2_copy, agent2_om_of_th1, agent2_om_of_val1)
             # No need to overwrite the refs for agent 1 because those aren't used in the outer loop as we're using KL div for agent 2
             # The inner KL div is done in the inner loop which will automatically recreate/save the ref before each set of inner loop steps
-            trainstate_th1_copy = create_trainstate(agent2_om_of_th1)
-            trainstate_val1_copy = create_trainstate(agent2_om_of_val1)
+            trainstate_th1_copy = copyTrainState(agent2_om_of_th1)
+            trainstate_val1_copy = copyTrainState(agent2_om_of_val1)
 
 
         key, subkey = jax.random.split(key)
@@ -1804,8 +1805,8 @@ def play(key, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, 
                                   args.outer_steps)
         _, _, _, trainstate_th2_copy, trainstate_val2_copy, _, _ = stuff
 
-        trainstate_after_outer_steps_th2 = create_trainstate(trainstate_th2_copy)
-        trainstate_after_outer_steps_val2 = create_trainstate(trainstate_val2_copy)
+        trainstate_after_outer_steps_th2 = copyTrainState(trainstate_th2_copy)
+        trainstate_after_outer_steps_val2 = copyTrainState(trainstate_val2_copy)
 
         # Note that this is updated only after all the outer loop steps have finished. the copies are
         # updated during the outer loops. But the main trainstate (like the main th) is updated only
@@ -1830,8 +1831,8 @@ def play(key, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, 
             same_colour_coins_record.append(same_colour_coins)
             diff_colour_coins_record.append(diff_colour_coins)
 
-        vs_fixed_strats_score_record[0].append(score1rec)
-        vs_fixed_strats_score_record[1].append(score2rec)
+        vs_fixed_strategies_scores[0].append(score1rec)
+        vs_fixed_strategies_scores[1].append(score2rec)
 
         score_record.append(jnp.stack((score1, score2)))
 
@@ -1865,7 +1866,7 @@ def play(key, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, 
                                                 trainstate_th2, trainstate_val2,
                                                 coins_collected_info,
                                                 score_record,
-                                                vs_fixed_strats_score_record),
+                                                vs_fixed_strategies_scores),
                                         step=update + 1, prefix=f"checkpoint_{now.strftime('%Y-%m-%d_%H-%M')}_seed{args.seed}_epoch")
 
 
@@ -1933,7 +1934,7 @@ if __name__ == "__main__":
 
     # Environment Setup
     if args.env == 'coin':
-        assert args.grid_size == 3  #  not implemented yet
+        assert args.grid_size == 3  # other sizes not implemented yet
         input_size = args.grid_size ** 2 * 4
         action_size = 4
         env = CoinGame()
@@ -1963,7 +1964,7 @@ if __name__ == "__main__":
 
         # Initialize score records
         score_record = [jnp.zeros((2,))] * epoch_num
-        vs_fixed_strats_score_record = [[jnp.zeros((3,))] * epoch_num, [jnp.zeros((3,))] * epoch_num]
+        vs_fixed_strategies_scores = [[jnp.zeros((3,))] * epoch_num, [jnp.zeros((3,))] * epoch_num]
         
         # Initialize coin collection records based on environment
         if args.env == 'coin':
@@ -1982,12 +1983,12 @@ if __name__ == "__main__":
         restored_tuple = checkpoints.restore_checkpoint(
             ckpt_dir=args.load_dir,
             target=(trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2,
-                    coins_collected_info, score_record, vs_fixed_strats_score_record),
+                    coins_collected_info, score_record, vs_fixed_strategies_scores),
             prefix=args.load_prefix
         )
 
         # Unpack restored tuple
-        trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, coins_collected_info, score_record, vs_fixed_strats_score_record = restored_tuple
+        trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, coins_collected_info, score_record, vs_fixed_strategies_scores = restored_tuple
 
 
     # Baseline Setup
