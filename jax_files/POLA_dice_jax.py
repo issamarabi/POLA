@@ -7,6 +7,7 @@
 import numpy as np
 import argparse
 import datetime
+from typing import Tuple, Any
 
 import jax
 from jax import jit
@@ -16,6 +17,7 @@ from functools import partial
 from flax import linen as nn
 import jax.numpy as jnp
 from flax.training.train_state import TrainState
+
 
 from flax.training import checkpoints
 
@@ -164,33 +166,62 @@ def act_w_iter_over_obs(stuff, env_batch_obs):
     stuff = (key, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, h_p, h_v)
     return stuff, act_aux
 
-@jit
-def act(stuff, unused ):
-    key, env_batch_states, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, h_p, h_v = stuff
+#####################################################################################################################
 
-    h_p, logits = th_p_trainstate.apply_fn(th_p_trainstate_params, env_batch_states, h_p)
-
-    categorical_act_probs = jax.nn.softmax(logits)
-    if use_baseline:
-        h_v, values = th_v_trainstate.apply_fn(th_v_trainstate_params, env_batch_states, h_v)
-        ret_vals = values.squeeze(-1)
-    else:
-        h_v, values = None, None
-        ret_vals = None
-
+@jax.jit
+def select_action(key: jax.random.PRNGKey, logits: jnp.ndarray) -> jnp.ndarray:
+    """Sample an action from the policy represented by logits."""
     dist = tfd.Categorical(logits=logits)
     key, subkey = jax.random.split(key)
-    actions = dist.sample(seed=subkey)
+    return dist.sample(seed=subkey), dist.log_prob
 
-    log_probs_actions = dist.log_prob(actions)
+@jax.jit
+def predict_value(trainstate: TrainState, params: jnp.ndarray, states: jnp.ndarray, hidden_state: jnp.ndarray) -> jnp.ndarray:
+    """Predict the value of a state."""
+    hidden_state, values = trainstate.apply_fn(params, states, hidden_state)
+    return values.squeeze(-1), hidden_state
 
+@jax.jit
+def act(key: jax.random.PRNGKey, states: jnp.ndarray, policy_trainstate: TrainState, policy_params: jnp.ndarray, 
+        value_trainstate: TrainState, value_params: jnp.ndarray, hidden_policy: jnp.ndarray, hidden_value: jnp.ndarray):
+    """
+    Generate an action for an agent given its policy and value function.
+    
+    Parameters:
+        key (jax.random.PRNGKey): Random key for generating actions.
+        states (jnp.ndarray): Current environment states.
+        policy_trainstate (TrainState): TrainState object for the policy.
+        policy_params (jnp.ndarray): Parameters for the policy.
+        value_trainstate (TrainState): TrainState object fozr the value function.
+        value_params (jnp.ndarray): Parameters for the value function.
+        hidden_policy (jnp.ndarray): Hidden state for the policy.
+        hidden_value (jnp.ndarray): Hidden state for the value function.
+        
+    Returns:
+        tuple: Updated states and auxiliary information.
+    """
+    # Compute action logits and update hidden state
+    hidden_policy, logits = policy_trainstate.apply_fn(policy_params, states, hidden_policy)
+    
+    # Select action
+    actions, log_probs_actions = select_action(key, logits)
+    
+    # Compute action probabilities
+    categorical_act_probs = jax.nn.softmax(logits)
+    
+    # Predict value if baseline is used
+    if use_baseline:
+        ret_vals, hidden_value = predict_value(value_trainstate, value_params, states, hidden_value)
+    else:
+        ret_vals, hidden_value = None, None
+    
+    # Prepare return values
+    new_states = (key, states, policy_trainstate, policy_params, value_trainstate, value_params, hidden_policy, hidden_value)
+    aux = (actions, log_probs_actions, ret_vals, hidden_policy, hidden_value, categorical_act_probs, logits)
+    
+    return new_states, aux
 
-    stuff = (key, env_batch_states, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, h_p, h_v)
-    aux = (actions, log_probs_actions, ret_vals, h_p, h_v, categorical_act_probs, logits)
-
-    return stuff, aux
-
-
+#####################################################################################################################
 
 class RNN(nn.Module):
     """
@@ -327,40 +358,73 @@ def get_policies_for_states_onebatch(key, th_p_trainstate, th_p_trainstate_param
 
 
 @jit
-def env_step(stuff, unused):
-    # TODO should make this agent agnostic? Or have a flip switch? Can reorganize later
-    key, env_state, obs1, obs2, \
-    trainstate_th1, trainstate_th1_params, trainstate_val1, trainstate_val1_params, \
-    trainstate_th2, trainstate_th2_params, trainstate_val2, trainstate_val2_params, \
-    h_p1, h_v1, h_p2, h_v2 = stuff
-    key, sk1, sk2, skenv = jax.random.split(key, 4)
-    act_args1 = (sk1, obs1, trainstate_th1, trainstate_th1_params,
-                trainstate_val1, trainstate_val1_params, h_p1, h_v1)
-    act_args2 = (sk2, obs2, trainstate_th2, trainstate_th2_params,
-                 trainstate_val2, trainstate_val2_params, h_p2, h_v2)
-    stuff1, aux1 = act(act_args1, None)
-    a1, lp1, v1, h_p1, h_v1, cat_act_probs1, logits1 = aux1
-    stuff2, aux2 = act(act_args2, None)
-    a2, lp2, v2, h_p2, h_v2, cat_act_probs2, logits2 = aux2
+def env_step(env_and_agent_states: Tuple, unused: Any) -> Tuple:
+    """
+    Perform one step in the environment for both agents.
+    
+    Parameters:
+        env_and_agent_states (Tuple): Tuple containing all the necessary information for the environment and agents.
+        unused (Any): Unused parameter, required for compatibility with jax.lax.scan.
+        
+    Returns:
+        Tuple: Updated states and auxiliary information.
+    """
+    # Unpack states
+    (key, env_state, obs_agent1, obs_agent2, 
+     train_state_agent1, train_state_params1, val_state_agent1, val_state_params1,
+     train_state_agent2, train_state_params2, val_state_agent2, val_state_params2,
+     hidden_policy1, hidden_value1, hidden_policy2, hidden_value2) = env_and_agent_states
+     
+    # Generate new subkeys
+    key, subkey_agent1, subkey_agent2, subkey_env = jax.random.split(key, 4)
+    
+    # Agent 1 action
+    new_states_agent1, aux_info_agent1 = agent_action(
+        subkey_agent1, obs_agent1, 
+        train_state_agent1, train_state_params1, 
+        val_state_agent1, val_state_params1, 
+        hidden_policy1, hidden_value1
+    )
+    
+    # Agent 2 action
+    new_states_agent2, aux_info_agent2 = agent_action(
+        subkey_agent2, obs_agent2, 
+        train_state_agent2, train_state_params2, 
+        val_state_agent2, val_state_params2, 
+        hidden_policy2, hidden_value2
+    )
+    
+    # Environment step
+    subkeys_env = jax.random.split(subkey_env, args.batch_size)
+    env_state, new_obs, rewards, aux_env_info = vec_env_step(env_state, aux_info_agent1[0], aux_info_agent2[0], subkeys_env)
+    
+    # Update observations
+    obs_agent1 = new_obs
+    obs_agent2 = new_obs
+    
+    # Prepare return values
+    updated_states = (
+        key, env_state, obs_agent1, obs_agent2,
+        train_state_agent1, train_state_params1, val_state_agent1, val_state_params1,
+        train_state_agent2, train_state_params2, val_state_agent2, val_state_params2,
+        hidden_policy1, hidden_value1, hidden_policy2, hidden_value2
+    )
+    
+    aux_info = (aux_info_agent1, aux_info_agent2, aux_env_info)
+    
+    return updated_states, aux_info
 
-    skenv = jax.random.split(skenv, args.batch_size)
+def agent_action(subkey, observation, train_state, train_state_params, val_state, val_state_params, hidden_policy, hidden_value):
+    """
+    Compute the action for an agent.
+    
+    Returns:
+        Tuple: Updated states and auxiliary information.
+    """
+    action_args = (subkey, observation, train_state, train_state_params, val_state, val_state_params, hidden_policy, hidden_value)
+    new_states, aux_info = act(action_args, None)
+    return new_states, aux_info
 
-    env_state, new_obs, (r1, r2), aux_info = vec_env_step(env_state, a1, a2, skenv)
-
-    obs1 = new_obs
-    obs2 = new_obs
-
-
-    stuff = (key, env_state, obs1, obs2,
-             trainstate_th1, trainstate_th1_params, trainstate_val1, trainstate_val1_params,
-             trainstate_th2, trainstate_th2_params, trainstate_val2, trainstate_val2_params,
-             h_p1, h_v1, h_p2, h_v2)
-
-    aux1 = (cat_act_probs1, obs1, lp1, lp2, v1, r1, a1, a2)
-
-    aux2 = (cat_act_probs2, obs2, lp2, lp1, v2, r2, a2, a1)
-
-    return stuff, (aux1, aux2, aux_info)
 
 @partial(jit, static_argnums=(9))
 def do_env_rollout(key, trainstate_th1, trainstate_th1_params, trainstate_val1,
@@ -1351,57 +1415,80 @@ def inspect_ipd(trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2
 
 @jit
 def eval_progress(subkey, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2):
+    """
+    Evaluate the performance of two agents in an environment.
+    
+    Parameters:
+        subkey (jax.random.PRNGKey): The random key for generating subkeys.
+        trainstate_th1 (TrainState), trainstate_val1 (TrainState): Training states for agent 1's policy and value function.
+        trainstate_th2 (TrainState), trainstate_val2 (TrainState): Training states for agent 2's policy and value function.
+        
+    Returns:
+        tuple: Various metrics like average rewards, match amounts, and scores against fixed strategies.
+    """
+    
+    # Splitting the random key for environment and agents
     keys = jax.random.split(subkey, args.batch_size + 1)
     key, env_subkeys = keys[0], keys[1:]
-    env_state, obsv = vec_env_reset(env_subkeys)
-    obs1 = obsv
-    obs2 = obsv
+    
+    # Initialize environment and get initial observations and hidden states
+    env_state, obs = vec_env_reset(env_subkeys)
+    obs1, obs2 = obs, obs
     h_p1, h_p2, h_v1, h_v2 = get_init_hidden_states()
-    key, subkey = jax.random.split(key)
-    stuff = (subkey, env_state, obs1, obs2,
-             trainstate_th1, trainstate_th1.params, trainstate_val1,
-             trainstate_val1.params,
-             trainstate_th2, trainstate_th2.params, trainstate_val2,
-             trainstate_val2.params,
-             h_p1, h_v1, h_p2, h_v2)
-
-    stuff, aux = jax.lax.scan(env_step, stuff, None, args.rollout_len)
+    
+    # Prepare the initial state for the environment loop
+    initial_state = (
+        key, env_state, obs1, obs2,
+        trainstate_th1, trainstate_val1,
+        trainstate_th2, trainstate_val2,
+        h_p1, h_v1, h_p2, h_v2
+    )
+    
+    # Run the environment loop to collect rewards
+    final_state, aux = jax.lax.scan(env_step, initial_state, None, args.rollout_len)
     aux1, aux2, aux_info = aux
-
-    _, _, _, _, _, r1, _, _ = aux1
-    _, _, _, _, _, r2, _, _ = aux2
-
-    score1rec = []
-    score2rec = []
-
-    print("Eval vs Fixed Strategies:")
-    for strat in ["alld", "allc", "tft"]:
-        # print(f"Playing against strategy: {strat.upper()}")
-        key, subkey = jax.random.split(key)
-        score1, _ = eval_vs_fixed_strategy(subkey, trainstate_th1, trainstate_val1, strat, self_agent=1)
-        score1rec.append(score1[0])
-        # print(f"Agent 1 score: {score1[0]}")
-        key, subkey = jax.random.split(key)
-        score2, _ = eval_vs_fixed_strategy(subkey, trainstate_th2, trainstate_val2, strat, self_agent=2)
-        score2rec.append(score2[1])
-        # print(f"Agent 2 score: {score2[1]}")
-
-    score1rec = jnp.stack(score1rec)
-    score2rec = jnp.stack(score2rec)
-
-    avg_rew1 = r1.mean()
-    avg_rew2 = r2.mean()
-
+    _, _, _, _, _, rewards1, _, _ = aux1
+    _, _, _, _, _, rewards2, _, _ = aux2
+    
+    # Evaluate against fixed strategies
+    scores1 = evaluate_against_strategies(key, trainstate_th1, trainstate_val1, self_agent=1)
+    scores2 = evaluate_against_strategies(key, trainstate_th2, trainstate_val2, self_agent=2)
+    
+    # Compute average rewards
+    avg_reward1 = rewards1.mean()
+    avg_reward2 = rewards2.mean()
+    
     if args.env == 'coin':
-        rr_matches, rb_matches, br_matches, bb_matches = aux_info
-        rr_matches_amount = rr_matches.sum(axis=0).mean()
-        rb_matches_amount = rb_matches.sum(axis=0).mean()
-        br_matches_amount = br_matches.sum(axis=0).mean()
-        bb_matches_amount = bb_matches.sum(axis=0).mean()
-        return avg_rew1, avg_rew2, rr_matches_amount, rb_matches_amount, br_matches_amount, bb_matches_amount, score1rec, score2rec
+        rr, rb, br, bb = aux_info
+        rr_count = rr.sum(axis=0).mean()
+        rb_count = rb.sum(axis=0).mean()
+        br_count = br.sum(axis=0).mean()
+        bb_count = bb.sum(axis=0).mean()
+        return avg_reward1, avg_reward2, rr_count, rb_count, br_count, bb_count, scores1, scores2
 
-    else:
-        return avg_rew1, avg_rew2, None, None, None, None, score1rec, score2rec
+    return avg_reward1, avg_reward2, None, None, None, None, scores1, scores2
+
+
+def evaluate_against_strategies(key, trainstate_policy, trainstate_value, self_agent):
+    """
+    Evaluate an agent's performance against fixed strategies.
+    
+    Parameters:
+        key (jax.random.PRNGKey): The random key for generating subkeys.
+        trainstate_policy (TrainState): Training state for the agent's policy.
+        trainstate_value (TrainState): Training state for the agent's value function.
+        self_agent (int): The index of the self agent (1 or 2).
+        
+    Returns:
+        jnp.ndarray: Scores against fixed strategies.
+    """
+    
+    scores = []
+    for strategy in ["alld", "allc", "tft"]:
+        key, subkey = jax.random.split(key)
+        score, _ = eval_vs_fixed_strategy(subkey, trainstate_policy, trainstate_value, strategy, self_agent=self_agent)
+        scores.append(score[self_agent - 1])
+    return jnp.stack(scores)
 
 
 def get_init_trainstates(key, action_size, input_size):
