@@ -2028,7 +2028,7 @@ if __name__ == "__main__":
     elif args.env == 'ipd':
         input_size = 6  # 3 * n_agents
         action_size = 2
-        env = IPD(init_state_coop=args.init_state_coop, contrib_factor=args.contrib_factor)
+        env = IPD(start_with_cooperation=args.init_state_coop, cooperation_factor=args.contrib_factor)
     else:
         raise NotImplementedError("unknown env")
 
