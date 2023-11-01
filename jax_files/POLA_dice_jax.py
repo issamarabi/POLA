@@ -239,7 +239,7 @@ class RNN(nn.Module):
     def setup(self):
         # Define dense layers before GRU
         self.linears = [nn.Dense(features=self.num_hidden_units) for _ in range(self.layers_before_gru)]
-        self.GRUCell = nn.GRUCell()
+        self.GRUCell = nn.GRUCell(features=self.num_hidden_units)  # Provide the required 'features' argument
         self.linear_end = nn.Dense(features=self.num_outputs)
 
     def __call__(self, x, carry):
@@ -249,11 +249,11 @@ class RNN(nn.Module):
             if i < len(self.linears) - 1:  # Only apply ReLU if it's not the last layer
                 x = nn.relu(x)
 
-
         # Pass through GRU cell
         carry, x = self.GRUCell(carry, x)
         outputs = self.linear_end(x)
         return carry, outputs
+
 
 
 @jit
