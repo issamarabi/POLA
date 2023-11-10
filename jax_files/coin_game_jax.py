@@ -195,23 +195,51 @@ class CoinGame:
 
         return actions
 
-    def get_moves_away_from_coin(self, moves_towards_coin: jnp.ndarray) -> jnp.ndarray:
+    def get_moves_shortest_path_to_coin(self, state, red_agent_perspective=True):
         """
-        Get the move that takes the agent away from the coin.
+        Calculate the move towards the shortest path to the coin in a grid environment.
 
-        Args:
-        - moves_towards_coin: The move that brings the agent closer to the coin.
+        This function computes the shortest path for an agent (either red or blue) to a coin
+        located on a grid. It evaluates the horizontal and vertical distances from the agent to the coin
+        and selects the move (action) that minimally reduces this distance.
+
+        Parameters:
+        - state (object): The current state of the environment, which includes the positions
+                          of the agent and the coin.
+        - red_agent_perspective (bool): A flag indicating whether the calculation is from the
+                                        perspective of the red agent. If False, the calculation
+                                        is done for the blue agent.
 
         Returns:
-        - opposite_moves: The move that takes the agent away from the coin.
-        """
-        opposite_moves = jnp.zeros_like(moves_towards_coin)
-        opposite_moves = jnp.where(moves_towards_coin == 0, 1, opposite_moves)
-        opposite_moves = jnp.where(moves_towards_coin == 1, 0, opposite_moves)
-        opposite_moves = jnp.where(moves_towards_coin == 2, 3, opposite_moves)
-        opposite_moves = jnp.where(moves_towards_coin == 3, 2, opposite_moves)
+        - actions (jax.numpy.ndarray): An array of integers representing the action(s) leading
+                                       towards the shortest path to the coin. The actions are encoded as:
+                                       0 - Move right, 1 - Move left, 2 - Move down, 3 - Move up.
 
-        return opposite_moves
+        Note:
+        - The grid size of the environment is taken into account, and the function assumes a toroidal
+          (wrap-around) topology.
+        - The calculation prioritizes horizontal movement (left/right) over vertical movement (up/down).
+        """
+        # Choose the agent's position based on perspective
+        agent_pos = state.red_pos if red_agent_perspective else state.blue_pos
+
+        # Calculate horizontal and vertical distances to the coin, modular with the grid size
+        horiz_dist_right = (state.coin_pos[:, 1] - agent_pos[:, 1]) % self.grid_size
+        horiz_dist_left = (agent_pos[:, 1] - state.coin_pos[:, 1]) % self.grid_size
+        vert_dist_down = (state.coin_pos[:, 0] - agent_pos[:, 0]) % self.grid_size
+        vert_dist_up = (agent_pos[:, 0] - state.coin_pos[:, 0]) % self.grid_size
+
+        # Initialize actions with a default value (e.g., 0)
+        actions = jnp.zeros_like(agent_pos[:, 0])
+
+        # Determine the action (move) based on the shortest path to the coin
+        actions = jnp.where(horiz_dist_right < horiz_dist_left, 0, actions)  # Move right
+        actions = jnp.where(horiz_dist_left < horiz_dist_right, 1, actions)  # Move left
+        actions = jnp.where(vert_dist_down < vert_dist_up, 2, actions)      # Move down
+        actions = jnp.where(vert_dist_up < vert_dist_down, 3, actions)      # Move up
+
+        return actions
+
 
     def get_coop_action(self, state, red_agent_perspective=True) -> jnp.ndarray:
         """
