@@ -167,34 +167,6 @@ class CoinGame:
         return new_state, obs, (red_reward, blue_reward), (red_red_matches, red_blue_matches, blue_red_matches, blue_blue_matches)
 
 
-    def get_moves_shortest_path_to_coin(self, state, red_agent_perspective=True) -> jnp.ndarray:
-        """
-        Get the move that brings the agent closer to the coin.
-
-        Args:
-        - state: Current state of the game.
-        - red_agent_perspective: If True, consider the red agent's perspective, otherwise consider the blue agent's.
-
-        Returns:
-        - actions: The move that brings the agent closer to the coin.
-        """
-        agent_pos = state.red_pos if red_agent_perspective else state.blue_pos
-
-        # Calculate horizontal and vertical distances to the coin.
-        horiz_dist_right = (state.coin_pos[:,1] - agent_pos[:,1]) % self.grid_size
-        horiz_dist_left = (agent_pos[:,1] - state.coin_pos[:,1]) % self.grid_size
-        vert_dist_down = (state.coin_pos[:,0] - agent_pos[:,0]) % self.grid_size
-        vert_dist_up = (agent_pos[:,0] - state.coin_pos[:,0]) % self.grid_size
-
-        # Determine the shortest path to the coin.
-        actions = jnp.zeros_like(agent_pos)
-        actions = jnp.where(horiz_dist_right < horiz_dist_left, 0, actions)
-        actions = jnp.where(horiz_dist_left < horiz_dist_right, 1, actions)
-        actions = jnp.where(vert_dist_down < vert_dist_up, 2, actions)
-        actions = jnp.where(vert_dist_up < vert_dist_down, 3, actions)
-
-        return actions
-
     def get_moves_shortest_path_to_coin(self, state, red_agent_perspective=True):
         """
         Calculate the move towards the shortest path to the coin in a grid environment.
@@ -239,6 +211,23 @@ class CoinGame:
         actions = jnp.where(vert_dist_up < vert_dist_down, 3, actions)      # Move up
 
         return actions
+
+
+  def get_moves_away_from_coin(self, moves_towards_coin: jnp.ndarray) -> jnp.ndarray:
+         """
+         Get the move that takes the agent away from the coin.
+         Args:
+         - moves_towards_coin: The move that brings the agent closer to the coin.
+         Returns:
+         - opposite_moves: The move that takes the agent away from the coin.
+         """
+         opposite_moves = jnp.zeros_like(moves_towards_coin)
+         opposite_moves = jnp.where(moves_towards_coin == 0, 1, opposite_moves)
+         opposite_moves = jnp.where(moves_towards_coin == 1, 0, opposite_moves)
+         opposite_moves = jnp.where(moves_towards_coin == 2, 3, opposite_moves)
+         opposite_moves = jnp.where(moves_towards_coin == 3, 2, opposite_moves)
+
+         return opposite_moves
 
 
     def get_coop_action(self, state, red_agent_perspective=True) -> jnp.ndarray:
