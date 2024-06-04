@@ -213,7 +213,7 @@ class CoinGame:
         return actions
 
 
-  def get_moves_away_from_coin(self, moves_towards_coin: jnp.ndarray) -> jnp.ndarray:
+    def get_moves_away_from_coin(self, moves_towards_coin: jnp.ndarray) -> jnp.ndarray:
          """
          Get the move that takes the agent away from the coin.
          Args:
