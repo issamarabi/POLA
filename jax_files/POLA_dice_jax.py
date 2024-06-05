@@ -160,35 +160,21 @@ def value_loss(rewards, values, final_state_vals):
 def act_w_iter_over_obs(stuff, env_batch_obs):
     key, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, h_p, h_v = stuff
     key, subkey = jax.random.split(key)
-    act_args, act_aux = act(subkey, env_batch_obs, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, h_p, h_v)
+    act_args, act_aux = generate_action(subkey, env_batch_obs, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, h_p, h_v)
     _, env_batch_obs, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, h_p, h_v = act_args
     stuff = (key, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, h_p, h_v)
     return stuff, act_aux
 
-#####################################################################################################################
 
 @jax.jit
-def select_action(key: jax.random.PRNGKey, logits: jnp.ndarray) -> jnp.ndarray:
-    """Sample an action from the policy represented by logits."""
-    dist = tfd.Categorical(logits=logits)
-    key, subkey = jax.random.split(key)
-    return dist.sample(seed=subkey), dist.log_prob
-
-@jax.jit
-def predict_value(trainstate: TrainState, params: jnp.ndarray, states: jnp.ndarray, hidden_state: jnp.ndarray) -> jnp.ndarray:
-    """Predict the value of a state."""
-    hidden_state, values = trainstate.apply_fn(params, states, hidden_state)
-    return values.squeeze(-1), hidden_state
-
-@jax.jit
-def act(key: jax.random.PRNGKey, states: jnp.ndarray, policy_trainstate: TrainState, policy_params: jnp.ndarray, 
+def generate_action(key: jax.random.PRNGKey, env_states: jnp.ndarray, policy_trainstate: TrainState, policy_params: jnp.ndarray, 
         value_trainstate: TrainState, value_params: jnp.ndarray, hidden_policy: jnp.ndarray, hidden_value: jnp.ndarray):
     """
     Generate an action for an agent given its policy and value function.
     
     Parameters:
         key (jax.random.PRNGKey): Random key for generating actions.
-        states (jnp.ndarray): Current environment states.
+        env_states (jnp.ndarray): Current environment states.
         policy_trainstate (TrainState): TrainState object for the policy.
         policy_params (jnp.ndarray): Parameters for the policy.
         value_trainstate (TrainState): TrainState object fozr the value function.
@@ -199,28 +185,29 @@ def act(key: jax.random.PRNGKey, states: jnp.ndarray, policy_trainstate: TrainSt
     Returns:
         tuple: Updated states and auxiliary information.
     """
-    # Compute action logits and update hidden state
-    hidden_policy, logits = policy_trainstate.apply_fn(policy_params, states, hidden_policy)
+    # Compute logits for the agent's actions based on the current environment state
+    hidden_policy, logits = policy_trainstate.apply_fn(policy_params, env_states, hidden_policy)
     
-    # Select action
-    actions, log_probs_actions = select_action(key, logits)
+    # Compute softmax probabilities of the actions
+    action_probs = jax.nn.softmax(logits)
     
-    # Compute action probabilities
-    categorical_act_probs = jax.nn.softmax(logits)
+    # Sample an action based on the logits
+    action_dist = tfd.Categorical(logits=logits)
+    key, subkey = jax.random.split(key)
+    actions = action_dist.sample(seed=subkey)
     
-    # Predict value if baseline is used
+    # Compute log probabilities of the sampled actions
+    log_probs_actions = action_dist.log_prob(actions)
+    
+    # Compute value estimates for the current state if using a baseline
     if use_baseline:
-        ret_vals, hidden_value = predict_value(value_trainstate, value_params, states, hidden_value)
+        hidden_value, values = value_trainstate.apply_fn(value_params, env_states, hidden_value)
+        value_estimates = values.squeeze(-1)
     else:
-        ret_vals, hidden_value = None, None
-    
-    # Prepare return values
-    new_states = (key, states, policy_trainstate, policy_params, value_trainstate, value_params, hidden_policy, hidden_value)
-    aux = (actions, log_probs_actions, ret_vals, hidden_policy, hidden_value, categorical_act_probs, logits)
-    
-    return new_states, aux
+        hidden_value, value_estimates = None, None
 
-#####################################################################################################################
+    return (key, env_states, policy_trainstate, policy_params, value_trainstate, value_params, hidden_policy, hidden_value), (actions, log_probs_actions, value_estimates, hidden_policy, hidden_value, action_probs, logits)
+
 
 class RNN(nn.Module):
     """
@@ -355,7 +342,6 @@ def get_policies_for_states_onebatch(key, th_p_trainstate, th_p_trainstate_param
     return cat_act_probs_list
 
 
-
 @jit
 def env_step(env_and_agent_states: Tuple, unused: Any) -> Tuple:
     """
@@ -378,50 +364,45 @@ def env_step(env_and_agent_states: Tuple, unused: Any) -> Tuple:
     key, subkey_agent1, subkey_agent2, subkey_env = jax.random.split(key, 4)
     
     # Agent 1 action
-    new_states_agent1, aux_info_agent1 = agent_action(
+    new_states_agent1, aux_info_agent1 = generate_action(
         subkey_agent1, obs_agent1, 
         train_state_agent1, train_state_params1, 
         val_state_agent1, val_state_params1, 
         hidden_policy1, hidden_value1
     )
+    a1, lp1, v1, h_p1, h_v1, cat_act_probs1, logits1 = aux_info_agent1
     
     # Agent 2 action
-    new_states_agent2, aux_info_agent2 = agent_action(
+    new_states_agent2, aux_info_agent2 = generate_action(
         subkey_agent2, obs_agent2, 
         train_state_agent2, train_state_params2, 
         val_state_agent2, val_state_params2, 
         hidden_policy2, hidden_value2
     )
+    a2, lp2, v2, h_p2, h_v2, cat_act_probs2, logits2 = aux_info_agent2
     
     # Environment step
     subkeys_env = jax.random.split(subkey_env, args.batch_size)
     env_state, new_obs, rewards, aux_env_info = vec_env_step(env_state, aux_info_agent1[0], aux_info_agent2[0], subkeys_env)
     
     # Update observations
-    obs_agent1 = new_obs
-    obs_agent2 = new_obs
+    obs1 = new_obs
+    obs2 = new_obs
     
     # Prepare return values
     updated_states = (
-        key, env_state, obs_agent1, obs_agent2,
+        key, env_state, obs1, obs2,
         train_state_agent1, train_state_params1, val_state_agent1, val_state_params1,
         train_state_agent2, train_state_params2, val_state_agent2, val_state_params2,
         hidden_policy1, hidden_value1, hidden_policy2, hidden_value2
     )
     
-    aux_info = (aux_info_agent1, aux_info_agent2, aux_env_info)
+    aux1 = (cat_act_probs1, obs1, lp1, lp2, v1, rewards[0], a1, a2)
+    aux2 = (cat_act_probs2, obs2, lp2, lp1, v2, rewards[1], a2, a1)
+
+    aux_info = (aux1, aux2, aux_env_info)
     
     return updated_states, aux_info
-
-def agent_action(subkey, observation, train_state, train_state_params, val_state, val_state_params, hidden_policy, hidden_value):
-    """
-    Compute the action for an agent.
-    
-    Returns:
-        Tuple: Updated states and auxiliary information.
-    """
-    new_states, aux_info = act(subkey, observation, train_state, train_state_params, val_state, val_state_params, hidden_policy, hidden_value)
-    return new_states, aux_info
 
 
 @partial(jit, static_argnums=(9))
@@ -487,7 +468,7 @@ def in_lookahead(key, trainstate_th1, trainstate_th1_params, trainstate_val1, tr
         inner_agent_state_history.extend(obs2_list)
 
         # act just to get the final state values
-        stuff2, aux2 = act(subkey2, obs2, trainstate_th2, trainstate_th2_params,
+        stuff2, aux2 = generate_action(subkey2, obs2, trainstate_th2, trainstate_th2_params,
                            trainstate_val2, trainstate_val2_params, h_p2, h_v2)
         a2, lp2, v2, h_p2, h_v2, cat_act_probs2, logits2 = aux2
 
@@ -507,7 +488,7 @@ def in_lookahead(key, trainstate_th1, trainstate_th1_params, trainstate_val1, tr
         cat_act_probs1_list, obs1_list, lp1_list, lp2_list, v1_list, r1_list, a1_list, a2_list = aux1
         inner_agent_state_history.extend(obs1_list)
 
-        stuff1, aux1 = act(subkey1, obs1, trainstate_th1, trainstate_th1_params,
+        stuff1, aux1 = generate_action(subkey1, obs1, trainstate_th1, trainstate_th1_params,
                      trainstate_val1, trainstate_val1_params, h_p1, h_v1)
         a1, lp1, v1, h_p1, h_v1, cat_act_probs1, logits1 = aux1
 
@@ -805,7 +786,7 @@ def out_lookahead(key, trainstate_th1, trainstate_th1_params, trainstate_val1, t
         key, subkey = jax.random.split(key)
         # act just to get the final state values
 
-        stuff1, aux1 = act(subkey, obs1, trainstate_th1, trainstate_th1_params,
+        stuff1, aux1 = generate_action(subkey, obs1, trainstate_th1, trainstate_th1_params,
                      trainstate_val1, trainstate_val1_params, h_p1, h_v1)
         a1, lp1, v1, h_p1, h_v1, cat_act_probs1, logits1 = aux1
 
@@ -823,7 +804,7 @@ def out_lookahead(key, trainstate_th1, trainstate_th1_params, trainstate_val1, t
 
         key, subkey = jax.random.split(key)
         # act just to get the final state values
-        stuff2, aux2 = act(subkey, obs2, trainstate_th2, trainstate_th2_params,
+        stuff2, aux2 = generate_action(subkey, obs2, trainstate_th2, trainstate_th2_params,
                      trainstate_val2, trainstate_val2_params, h_p2, h_v2)
         a2, lp2, v2, h_p2, h_v2, cat_act_probs2, logits2 = aux2
 
@@ -1034,7 +1015,7 @@ def eval_vs_alld_selfagent1(stuff, unused):
 
     key, subkey = jax.random.split(key)
 
-    stuff, aux = act(subkey, obsv, trainstate_th, trainstate_th.params,
+    stuff, aux = generate_action(subkey, obsv, trainstate_th, trainstate_th.params,
                      trainstate_val,trainstate_val.params, h_p, h_v)
     a, lp, v, h_p, h_v, cat_act_probs, logits = aux
 
@@ -1073,7 +1054,7 @@ def eval_vs_alld_selfagent2(stuff, unused):
 
     key, subkey = jax.random.split(key)
 
-    stuff, aux = act(subkey, obsv, trainstate_th, trainstate_th.params, trainstate_val,
+    stuff, aux = generate_action(subkey, obsv, trainstate_th, trainstate_th.params, trainstate_val,
                      trainstate_val.params, h_p, h_v)
     a, lp, v, h_p, h_v, cat_act_probs, logits = aux
 
@@ -1111,10 +1092,7 @@ def eval_vs_allc_selfagent1(stuff, unused):
 
     key, subkey = jax.random.split(key)
 
-    act_args = (
-    
-
-    stuff, aux = act(subkey, obsv, trainstate_th, trainstate_th.params,
+    stuff, aux = generate_action(subkey, obsv, trainstate_th, trainstate_th.params,
                      trainstate_val, trainstate_val.params, h_p, h_v)
     a, lp, v, h_p, h_v, cat_act_probs, logits = aux
 
@@ -1152,10 +1130,7 @@ def eval_vs_allc_selfagent2(stuff, unused):
 
     key, subkey = jax.random.split(key)
 
-    act_args = (
-    )
-
-    stuff, aux = act(subkey, obsv, trainstate_th, trainstate_th.params,
+    stuff, aux = generate_action(subkey, obsv, trainstate_th, trainstate_th.params,
                      trainstate_val, trainstate_val.params, h_p, h_v)
     a, lp, v, h_p, h_v, cat_act_probs, logits = aux
 
@@ -1193,10 +1168,7 @@ def eval_vs_tft_selfagent1(stuff, unused):
 
     key, subkey = jax.random.split(key)
 
-    act_args = (
-    )
-
-    stuff, aux = act(subkey, obsv, trainstate_th, trainstate_th.params,
+    stuff, aux = generate_action(subkey, obsv, trainstate_th, trainstate_th.params,
                      trainstate_val, trainstate_val.params, h_p, h_v)
     a, lp, v, h_p, h_v, cat_act_probs, logits = aux
 
@@ -1241,10 +1213,7 @@ def eval_vs_tft_selfagent2(stuff, unused):
 
     key, subkey = jax.random.split(key)
 
-    act_args = (
-    )
-
-    stuff, aux = act(subkey, obsv, trainstate_th, trainstate_th.params, 
+    stuff, aux = generate_action(subkey, obsv, trainstate_th, trainstate_th.params, 
                      trainstate_val, trainstate_val.params, h_p, h_v)
     a, lp, v, h_p, h_v, cat_act_probs, logits = aux
 
@@ -1625,9 +1594,9 @@ def opp_model_selfagent1_single_batch(inputstuff, unused ):
             key, subkey = jax.random.split(key)
 
             # For OM we should not be using the hidden states of the other agent's RNN
-            # This only affects the OM value function though, so shouldn't make a huge difference in terms of the actual policies learned.
+            # This only affects the generate_OM value function though, so shouldn't make a huge difference in terms of the actual policies learned.
 
-            stuff2, aux2 = act(subkey, obs2, om_trainstate_th, om_trainstate_th.params,
+            stuff2, aux2 = generate_action(subkey, obs2, om_trainstate_th, om_trainstate_th.params,
                                om_trainstate_val, om_trainstate_val.params, h_p_list[-1], h_v_list[-1], None)
             a2, lp2, v2, h_p2, h_v2, cat_act_probs2, logits2 = aux2
 
@@ -1700,7 +1669,7 @@ def opp_model_selfagent2_single_batch(inputstuff, unused ):
             # act just to get the final state values
             key, subkey = jax.random.split(key)
 
-            stuff1, aux1 = act(subkey, obs1, om_trainstate_th, om_trainstate_th.params,
+            stuff1, aux1 = generate_action(subkey, obs1, om_trainstate_th, om_trainstate_th.params,
                                om_trainstate_val, om_trainstate_val.params, h_p_list[-1], h_v_list[-1])
 
             a1, lp1, v1, h_p1, h_v1, cat_act_probs1, logits1 = aux1
