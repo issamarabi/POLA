@@ -1,3 +1,9 @@
+# Some parts adapted from https://github.com/alexis-jacq/LOLA_DiCE/blob/master/ipd_DiCE.py
+# Some parts adapted from Chris Lu's MOFOS repo
+
+
+# TODO: FULL CODE REVIEW AND COMMENT EVERYTHING THAT IS HAPPENING.
+
 import numpy as np
 import argparse
 import datetime
