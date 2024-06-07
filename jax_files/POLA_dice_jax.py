@@ -1,9 +1,3 @@
-# Some parts adapted from https://github.com/alexis-jacq/LOLA_DiCE/blob/master/ipd_DiCE.py
-# Some parts adapted from Chris Lu's MOFOS repo
-
-
-# TODO: FULL CODE REVIEW AND COMMENT EVERYTHING THAT IS HAPPENING.
-
 import numpy as np
 import argparse
 import datetime
@@ -1818,6 +1812,9 @@ def play(key, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, 
 
         stuff, aux = jax.lax.scan(one_outer_step_update_selfagent1, stuff, None, args.outer_steps)
         _, trainstate_th1_copy, trainstate_val1_copy, _, _, _, _ = stuff
+
+        trainstate_after_outer_steps_th1 = copyTrainState(trainstate_th1_copy)
+        trainstate_after_outer_steps_val1 = copyTrainState(trainstate_val1_copy)
 
         # --- START OF AGENT 2 UPDATE ---
 
