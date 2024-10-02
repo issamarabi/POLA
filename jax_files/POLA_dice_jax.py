@@ -1,5 +1,3 @@
-# Adapted from https://github.com/Silent-Zebra/POLA
-
 import numpy as np
 import argparse
 import datetime
@@ -12,42 +10,58 @@ from functools import partial
 from flax import linen as nn
 import jax.numpy as jnp
 from flax.training.train_state import TrainState
-
 from flax.training import checkpoints
 
 from tensorflow_probability.substrates import jax as tfp
 
 tfd = tfp.distributions
 
-
 from coin_game_jax import CoinGame
 from ipd_jax import IPD
 
+
+###############################################################################
+#                               Utility Functions                             #
+###############################################################################
+
 def reverse_cumsum(x, axis):
+    """
+    Performs reverse cumulative sum along a given axis.
+    Example:
+      If x = [1, 2, 3], reverse_cumsum(x) would produce:
+      [
+        (1+2+3), (2+3), 3
+      ]
+    """
     return x + jnp.sum(x, axis=axis, keepdims=True) - jnp.cumsum(x, axis=axis)
 
-# DiCE operator
 @jit
 def magic_box(x):
+    """
+    The DiCE "magic box" operator: exp(x - stop_gradient(x)).
+    """
     return jnp.exp(x - jax.lax.stop_gradient(x))
 
 @jit
 def update_gae_with_delta_backwards(gae, delta):
+    """
+    Helper function for scan to accumulate generalized advantage estimates (GAE).
+    """
     gae = gae * args.gamma * args.gae_lambda + delta
     return gae, gae
 
 @jit
 def get_gae_advantages(rewards, values, next_val_history):
-    deltas = rewards + args.gamma * jax.lax.stop_gradient(
-        next_val_history) - jax.lax.stop_gradient(values)
-
-    gae = jnp.zeros_like(deltas[0, :])
-
-    deltas = jnp.flip(deltas, axis=0)
-    gae, flipped_advantages = jax.lax.scan(update_gae_with_delta_backwards, gae, deltas, deltas.shape[0])
+    """
+    Computes GAE advantages given rewards, value estimates, and next-step value estimates.
+    """
+    deltas = rewards + args.gamma * jax.lax.stop_gradient(next_val_history) - jax.lax.stop_gradient(values)
+    gae_init = jnp.zeros_like(deltas[0, :])
+    deltas_reversed = jnp.flip(deltas, axis=0)
+    gae_final, flipped_advantages = jax.lax.scan(update_gae_with_delta_backwards, gae_init, deltas_reversed)
     advantages = jnp.flip(flipped_advantages, axis=0)
-
     return advantages
+
 
 @jit
 def dice_objective(self_logprobs, other_logprobs, rewards, values, end_state_v):
