@@ -63,11 +63,18 @@ def get_gae_advantages(rewards, values, next_val_history):
     return advantages
 
 
+###############################################################################
+#                          Core DiCE / GAE Objectives                         #
+###############################################################################
+
 @jit
 def dice_objective(self_logprobs, other_logprobs, rewards, values, end_state_v):
-    # apply discount:
-    cum_discount = jnp.cumprod(args.gamma * jnp.ones(rewards.shape),
-                                 axis=0) / args.gamma
+    """
+    Computes the (loaded) DiCE objective:
+      If use_baseline is True, uses Loaded DiCE with GAE for variance reduction.
+      If use_baseline is False, uses basic DiCE without baseline.
+    """
+    cum_discount = jnp.cumprod(args.gamma * jnp.ones(rewards.shape), axis=0) / args.gamma
     discounted_rewards = rewards * cum_discount
 
     # stochastics nodes involved in rewards dependencies:
@@ -76,13 +83,10 @@ def dice_objective(self_logprobs, other_logprobs, rewards, values, end_state_v):
     # logprob of all stochastic nodes:
     stochastic_nodes = self_logprobs + other_logprobs
 
-    use_loaded_dice = False
-    if use_baseline:
-        use_loaded_dice = True
+    use_loaded_dice = use_baseline
 
     if use_loaded_dice:
         next_val_history = jnp.zeros((args.rollout_len, args.batch_size))
-
         next_val_history = next_val_history.at[:args.rollout_len - 1, :].set(values[1:args.rollout_len, :])
         next_val_history = next_val_history.at[-1, :].set(end_state_v)
 
@@ -91,77 +95,84 @@ def dice_objective(self_logprobs, other_logprobs, rewards, values, end_state_v):
             values = jnp.zeros_like(values)
 
         advantages = get_gae_advantages(rewards, values, next_val_history)
-
         discounted_advantages = advantages * cum_discount
-
-        deps_up_to_t = (jnp.cumsum(stochastic_nodes, axis=0))
-
+        deps_up_to_t = jnp.cumsum(stochastic_nodes, axis=0)
         deps_less_than_t = deps_up_to_t - stochastic_nodes  # take out the dependency in the given time step
 
-        # Look at Loaded DiCE and GAE papers to see where this formulation comes from
-        loaded_dice_rewards = ((magic_box(deps_up_to_t) - magic_box(
-            deps_less_than_t)) * discounted_advantages).sum(axis=0).mean()
-
-        dice_obj = loaded_dice_rewards
-
+        # Formulation from Loaded DiCE and GAE papers
+        loaded_dice_rewards = (magic_box(deps_up_to_t) - magic_box(deps_less_than_t)) * discounted_advantages
+        dice_obj = loaded_dice_rewards.sum(axis=0).mean()
     else:
-        # dice objective:
-        # REMEMBER that in this jax code the axis 0 is the rollout_len (number of time steps in the environment)
-        # and axis 1 is the batch.
-        dice_obj = jnp.mean(
-            jnp.sum(magic_box(dependencies) * discounted_rewards, axis=0))
+        dice_obj = jnp.mean(jnp.sum(magic_box(dependencies) * discounted_rewards, axis=0))
 
+    return -dice_obj  # Minimizing negative of the objective.
 
-    return -dice_obj  # want to minimize -objective
+@jit
+def value_loss(rewards, values, final_state_vals):
+    """
+    Computes the MSE loss for the value function using a blend of Monte Carlo and bootstrapping.
 
+    Specifically, it calculates a partial Monte Carlo return and incorporates a bootstrap
+    estimate from the final state's value. This approach balances the bias-variance trade-off.
+    """
+    # Stop gradient on the final state values because these are target values for the value function.
+    # We don't want to backpropagate through the value network when calculating the target.
+    final_state_vals = jax.lax.stop_gradient(final_state_vals)
+
+    # Calculate the discount factors for each time step.
+    # 'args.gamma' is the discount rate.
+    # We create an array of gamma values and compute the cumulative product to get gamma^t for each t.
+    # Dividing by args.gamma ensures the first discount factor is 1.
+    discounts = jnp.cumprod(args.gamma * jnp.ones(rewards.shape),
+                                 axis=0) / args.gamma
+
+    # Calculate the discounted rewards at each time step.
+    gamma_t_r_ts = rewards * discounts
+
+    # Calculate the sum of discounted rewards from each time step onwards, discounted to the first time step.
+    # 'reverse_cumsum' computes the cumulative sum in reverse order.
+    # The first entry of G_ts will contain the sum of all future discounted rewards.
+    # The second entry will contain the sum of rewards from the second step onwards, discounted to the first time step, and so on.
+    G_ts = reverse_cumsum(gamma_t_r_ts, axis=0)
+
+    # Adjust the discounted rewards to be discounted to the appropriate current time step.
+    # By dividing G_ts by the 'discounts', we effectively bring the discounted rewards to the correct time frame.
+    # For example, after dividing by discounts, the rewards from time step 2 onwards are discounted only up to time step 2.
+    R_ts = G_ts / discounts
+
+    # Calculate the discounted value of the final state, discounted back to the current time steps.
+    # 'jnp.flip(discounts, axis=0)' reverses the discounts array so that the discount factor aligns with the time remaining until the end.
+    final_val_discounted_to_curr = (args.gamma * jnp.flip(discounts, axis=0)) * final_state_vals
+
+    # Calculate the target values for the value function.
+    # This is a mix of Monte Carlo return (R_ts) and a bootstrapped estimate from the final state value.
+    # We add the discounted final state value to the Monte Carlo return.
+    # It's crucial to detach the final state values (done above) because they serve as the target and should not contribute to the gradient of the value network in the current step.
+    # This approach provides a more consistent value calculation, especially towards the end of an episode.
+    target_values = R_ts + final_val_discounted_to_curr
+
+    values_loss = (target_values - values) ** 2
+
+    values_loss = values_loss.sum(axis=0).mean()
+
+    return values_loss
 
 @jit
 def dice_objective_plus_value_loss(self_logprobs, other_logprobs, rewards, values, end_state_v):
-    # Essentially a wrapper function for the objective to put all the control flow in one spot
-    # The reasoning behind this function here is that the reward_loss has a stop_gradient
-    # on all of the nodes related to the value function
-    # and the value function has no nodes related to the policy
-    # Then we can actually take the respective grads like the way I have things set up now
-    # And I should be able to update both policy and value functions
-
+    """
+    This function serves as a wrapper to combine the DiCE objective and the value function loss.
+    It ensures that gradients are computed correctly for both policy and value updates.
+    The reward loss has a stop_gradient on nodes related to the value function, and the value
+    function loss has no nodes related to the policy. This allows for independent updates.
+    If use_baseline is True, it sums the DiCE objective with the value function loss; otherwise,
+    it returns only the DiCE objective.
+    """
     reward_loss = dice_objective(self_logprobs, other_logprobs, rewards, values, end_state_v)
-
     if use_baseline:
         val_loss = value_loss(rewards, values, end_state_v)
         return reward_loss + val_loss
     else:
         return reward_loss
-
-
-@jit
-def value_loss(rewards, values, final_state_vals):
-
-    final_state_vals = jax.lax.stop_gradient(final_state_vals)
-
-    discounts = jnp.cumprod(args.gamma * jnp.ones(rewards.shape),
-                                 axis=0) / args.gamma
-
-    gamma_t_r_ts = rewards * discounts
-
-    # sum of discounted rewards (discounted to the first time step); first entry has all the future discounted rewards,
-    # second entry has all the rewards from the second step onwards, but discounted to the first time step!
-    # Thus, dividing by the cumulative discount brings the discounted rewards to the appropriate time step
-    # e.g. after dividing by discounts, you now have the rewards from time step 2 onwards discounted
-    # only up to time step 2
-    G_ts = reverse_cumsum(gamma_t_r_ts, axis=0)
-    R_ts = G_ts / discounts
-
-    final_val_discounted_to_curr = (args.gamma * jnp.flip(discounts, axis=0)) * final_state_vals
-
-    # You DO need a detach on these. Because it's the target - it should be detached. It's a target value.
-    # Essentially a Monte Carlo style type return for R_t, except for the final state we also use the estimated final state value.
-    # This becomes our target for the value function loss. So it's kind of a mix of Monte Carlo and bootstrap, but anyway you need the final value
-    # because otherwise your value calculations will be inconsistent
-    values_loss = (R_ts + final_val_discounted_to_curr - values) ** 2
-
-    values_loss = values_loss.sum(axis=0).mean()
-
-    return values_loss
 
 
 @jit
