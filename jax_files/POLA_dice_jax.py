@@ -175,41 +175,90 @@ def dice_objective_plus_value_loss(self_logprobs, other_logprobs, rewards, value
         return reward_loss
 
 
-@jit
-def act_w_iter_over_obs(stuff, env_batch_obs):
-    key, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, h_p, h_v = stuff
-    key, subkey = jax.random.split(key)
-    act_args = (subkey, env_batch_obs, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, h_p, h_v)
-    act_args, act_aux = act(act_args, None)
-    _, env_batch_obs, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, h_p, h_v = act_args
-    stuff = (key, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, h_p, h_v)
-    return stuff, act_aux
+
+###############################################################################
+#                           Acting in the Environment                         #
+###############################################################################
 
 @jit
-def act(stuff, unused ):
-    key, env_batch_states, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, h_p, h_v = stuff
+def act(scan_carry, _):
+    """
+    Makes a single step action with a policy RNN:
+    - sample the action from the categorical distribution,
+    - compute log probability of the action,
+    - optionally compute value if use_baseline is True.
+    """
+    (key, obs_batch, trainstate_p, trainstate_p_params,
+     trainstate_v, trainstate_v_params, hidden_p, hidden_v) = scan_carry
 
-    h_p, logits = th_p_trainstate.apply_fn(th_p_trainstate_params, env_batch_states, h_p)
-
-    categorical_act_probs = jax.nn.softmax(logits)
-    if use_baseline:
-        h_v, values = th_v_trainstate.apply_fn(th_v_trainstate_params, env_batch_states, h_v)
-        ret_vals = values.squeeze(-1)
-    else:
-        h_v, values = None, None
-        ret_vals = None
-
+    hidden_p, logits = trainstate_p.apply_fn(trainstate_p_params, obs_batch, hidden_p)
     dist = tfd.Categorical(logits=logits)
     key, subkey = jax.random.split(key)
     actions = dist.sample(seed=subkey)
-
     log_probs_actions = dist.log_prob(actions)
 
+    if use_baseline:
+        hidden_v, values = trainstate_v.apply_fn(trainstate_v_params, obs_batch, hidden_v)
+        ret_vals = values.squeeze(-1)
+    else:
+        hidden_v, ret_vals = None, None
 
-    stuff = (key, env_batch_states, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, h_p, h_v)
-    aux = (actions, log_probs_actions, ret_vals, h_p, h_v, categorical_act_probs, logits)
+    new_scan_carry = (key, obs_batch, trainstate_p, trainstate_p_params,
+                      trainstate_v, trainstate_v_params, hidden_p, hidden_v)
+    auxiliary = (actions, log_probs_actions, ret_vals, hidden_p, hidden_v,
+                 jax.nn.softmax(logits), logits)
+    return new_scan_carry, auxiliary
 
-    return stuff, aux
+@jit
+def act_w_iter_over_obs(scan_carry, env_batch_obs):
+    """
+    jax.lax.scan wrapper to iterate over multiple observations in the environment 
+    rollout and apply `act` at each step.
+    """
+    key, p_state, p_params, v_state, v_params, h_p, h_v = scan_carry
+    key, subkey = jax.random.split(key)
+    act_input = (subkey, env_batch_obs, p_state, p_params, v_state, v_params, h_p, h_v)
+    new_act_input, act_aux = act(act_input, None)
+    (_, _, p_state, p_params, v_state, v_params, h_p, h_v) = new_act_input
+    new_scan_carry = (key, p_state, p_params, v_state, v_params, h_p, h_v)
+    return new_scan_carry, act_aux
+
+@jit
+def env_step(scan_carry, _):
+    """
+    Single environment step for both agents (1 and 2). Each agent acts using 
+    policy RNN, obtains next state, rewards, etc.
+    """
+    (key, env_state, obs1, obs2,
+     th1, th1_params, val1, val1_params,
+     th2, th2_params, val2, val2_params,
+     h_p1, h_v1, h_p2, h_v2) = scan_carry
+
+    key, key1, key2, env_key = jax.random.split(key, 4)
+
+    # Agent 1 step
+    act_args1 = (key1, obs1, th1, th1_params, val1, val1_params, h_p1, h_v1)
+    _, aux1 = act(act_args1, None)
+    a1, lp1, v1, h_p1, h_v1, cat_probs1, logits1 = aux1
+
+    # Agent 2 step
+    act_args2 = (key2, obs2, th2, th2_params, val2, val2_params, h_p2, h_v2)
+    _, aux2 = act(act_args2, None)
+    a2, lp2, v2, h_p2, h_v2, cat_probs2, logits2 = aux2
+
+    env_subkeys = jax.random.split(env_key, args.batch_size)
+    env_state_next, obs_next, (r1, r2), aux_info = vec_env_step(env_state, a1, a2, env_subkeys)
+
+    scan_carry_next = (key, env_state_next, obs_next, obs_next,
+                       th1, th1_params, val1, val1_params,
+                       th2, th2_params, val2, val2_params,
+                       h_p1, h_v1, h_p2, h_v2)
+
+    # Aux for each agent is (policy distribution, obs, self_logprob, other_logprob, self_values, reward, self_action, other_action)
+    aux1_out = (cat_probs1, obs_next, lp1, lp2, v1, r1, a1, a2)
+    aux2_out = (cat_probs2, obs_next, lp2, lp1, v2, r2, a2, a1)
+
+    return scan_carry_next, (aux1_out, aux2_out, aux_info)
 
 
 
@@ -340,42 +389,6 @@ def get_policies_for_states_onebatch(key, th_p_trainstate, th_p_trainstate_param
     return cat_act_probs_list
 
 
-
-@jit
-def env_step(stuff, unused):
-    # TODO should make this agent agnostic? Or have a flip switch? Can reorganize later
-    key, env_state, obs1, obs2, \
-    trainstate_th1, trainstate_th1_params, trainstate_val1, trainstate_val1_params, \
-    trainstate_th2, trainstate_th2_params, trainstate_val2, trainstate_val2_params, \
-    h_p1, h_v1, h_p2, h_v2 = stuff
-    key, sk1, sk2, skenv = jax.random.split(key, 4)
-    act_args1 = (sk1, obs1, trainstate_th1, trainstate_th1_params,
-                trainstate_val1, trainstate_val1_params, h_p1, h_v1)
-    act_args2 = (sk2, obs2, trainstate_th2, trainstate_th2_params,
-                 trainstate_val2, trainstate_val2_params, h_p2, h_v2)
-    stuff1, aux1 = act(act_args1, None)
-    a1, lp1, v1, h_p1, h_v1, cat_act_probs1, logits1 = aux1
-    stuff2, aux2 = act(act_args2, None)
-    a2, lp2, v2, h_p2, h_v2, cat_act_probs2, logits2 = aux2
-
-    skenv = jax.random.split(skenv, args.batch_size)
-
-    env_state, new_obs, (r1, r2), aux_info = vec_env_step(env_state, a1, a2, skenv)
-
-    obs1 = new_obs
-    obs2 = new_obs
-
-
-    stuff = (key, env_state, obs1, obs2,
-             trainstate_th1, trainstate_th1_params, trainstate_val1, trainstate_val1_params,
-             trainstate_th2, trainstate_th2_params, trainstate_val2, trainstate_val2_params,
-             h_p1, h_v1, h_p2, h_v2)
-
-    aux1 = (cat_act_probs1, obs1, lp1, lp2, v1, r1, a1, a2)
-
-    aux2 = (cat_act_probs2, obs2, lp2, lp1, v2, r2, a2, a1)
-
-    return stuff, (aux1, aux2, aux_info)
 
 @partial(jit, static_argnums=(9))
 def do_env_rollout(key, trainstate_th1, trainstate_th1_params, trainstate_val1,
