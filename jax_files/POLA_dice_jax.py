@@ -261,8 +261,16 @@ def env_step(scan_carry, _):
     return scan_carry_next, (aux1_out, aux2_out, aux_info)
 
 
+###############################################################################
+#                    Policy / Value RNN definitions (Flax)                    #
+###############################################################################
 
 class RNN(nn.Module):
+    """
+    A simple RNN using optional Dense layers (layers_before_gru) before 
+    feeding into a GRUCell, then a final Dense to produce outputs.
+    Only supports 2 layers before GRU for now.
+    """
     num_outputs: int
     num_hidden_units: int
     layers_before_gru: int
@@ -272,8 +280,6 @@ class RNN(nn.Module):
             self.linear1 = nn.Dense(features=self.num_hidden_units)
         if self.layers_before_gru >= 2:
             self.linear2 = nn.Dense(features=self.num_hidden_units)
-            # Right now only supports 1 or 2, obviously can add more. Also obviously can put into a list
-            # and use a loop
         self.GRUCell = nn.GRUCell(features=self.num_hidden_units)
         self.linear_end = nn.Dense(features=self.num_outputs)
 
