@@ -295,55 +295,53 @@ class RNN(nn.Module):
         return carry, outputs
 
 
+###############################################################################
+#              Helpers: RNN forward calls for multiple time steps             #
+###############################################################################
+
 @jit
-def get_policies_for_states(key, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, obs_hist):
-
+def get_policies_for_states(key, train_p, train_p_params, train_v, train_v_params, obs_hist):
+    """
+    Iterates over obs_hist with a policy RNN, returning the probability 
+    distribution for each time step's observation. 
+    Does not return values. 
+    """
     h_p = jnp.zeros((args.batch_size, args.hidden_size))
-    h_v = None
-    if use_baseline:
-        h_v = jnp.zeros((args.batch_size, args.hidden_size))
-
+    h_v = jnp.zeros((args.batch_size, args.hidden_size)) if use_baseline else None
     key, subkey = jax.random.split(key)
-
-    act_args = (subkey, th_p_trainstate, th_p_trainstate_params,
-                th_v_trainstate, th_v_trainstate_params, h_p, h_v)
-    # Note that I am scanning using xs = obs_hist. Then the scan should work through the
-    # array of obs.
-    obs_hist_for_scan = jnp.stack(obs_hist[:args.rollout_len], axis=0) # skips final obs (but includes init/start state/obs)
-
-    act_args, aux_lists = jax.lax.scan(act_w_iter_over_obs, act_args, obs_hist_for_scan, args.rollout_len)
-    # act_args, aux_lists = jax.lax.scan(act_w_iter_over_obs, act_args, obs_hist_for_scan, obs_hist_for_scan.shape[0])
-
-    a_list, lp_list, v_list, h_p_list, h_v_list, cat_act_probs_list, logits_list = aux_lists
-
-
+    init_scan_carry = (subkey, train_p, train_p_params, train_v, train_v_params, h_p, h_v)
+    obs_hist_for_scan = jnp.stack(obs_hist[:args.rollout_len], axis=0) # skips the last observation
+    final_scan_carry, aux_lists = jax.lax.scan(act_w_iter_over_obs, init_scan_carry, obs_hist_for_scan, args.rollout_len)
+    (_, _, _, _, _, _, _), (a_list, lp_list, v_list, h_p_list, h_v_list, cat_act_probs_list, logits_list) = (final_scan_carry, aux_lists)
     return cat_act_probs_list
 
-
-# Same as above except just also return values
 @jit
-def get_policies_and_values_for_states(key, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, obs_hist):
-
+def get_policies_and_values_for_states(key, train_p, train_p_params, train_v, train_v_params, obs_hist):
+    """
+    Iterates over obs_hist with RNN, returning both probabilities and value estimates.
+    """
     h_p = jnp.zeros((args.batch_size, args.hidden_size))
-    h_v = None
-    if use_baseline:
-        h_v = jnp.zeros((args.batch_size, args.hidden_size))
-
+    h_v = jnp.zeros((args.batch_size, args.hidden_size)) if use_baseline else None
     key, subkey = jax.random.split(key)
+    init_scan_carry = (subkey, train_p, train_p_params, train_v, train_v_params, h_p, h_v)
+    obs_hist_for_scan = jnp.stack(obs_hist[:args.rollout_len], axis=0)
+    final_scan_carry, aux_lists = jax.lax.scan(act_w_iter_over_obs, init_scan_carry, obs_hist_for_scan, args.rollout_len)
+    (_, _, _, _, _, _, _), (a_list, lp_list, v_list, h_p_list, h_v_list, cat_probs_list, logits_list) = (final_scan_carry, aux_lists)
+    return cat_probs_list, v_list
 
-    act_args = (subkey, th_p_trainstate, th_p_trainstate_params,
-                th_v_trainstate, th_v_trainstate_params, h_p, h_v)
-    # Note that I am scanning using xs = obs_hist. Then the scan should work through the
-    # array of obs.
-    obs_hist_for_scan = jnp.stack(obs_hist[:args.rollout_len], axis=0) # skips final obs (but includes init/start state/obs)
+def get_init_hidden_states():
+    """
+    Returns initial hidden states for the policy & value RNNs.
+    """
+    h_p1 = jnp.zeros((args.batch_size, args.hidden_size))
+    h_p2 = jnp.zeros((args.batch_size, args.hidden_size))
+    h_v1 = None
+    h_v2 = None
+    if use_baseline:
+        h_v1 = jnp.zeros((args.batch_size, args.hidden_size))
+        h_v2 = jnp.zeros((args.batch_size, args.hidden_size))
+    return h_p1, h_p2, h_v1, h_v2
 
-    act_args, aux_lists = jax.lax.scan(act_w_iter_over_obs, act_args, obs_hist_for_scan, args.rollout_len)
-    # act_args, aux_lists = jax.lax.scan(act_w_iter_over_obs, act_args, obs_hist_for_scan, obs_hist_for_scan.shape[0])
-
-    a_list, lp_list, v_list, h_p_list, h_v_list, cat_act_probs_list, logits_list = aux_lists
-
-
-    return cat_act_probs_list, v_list
 
 # Same as before again, but now returning the h_p and h_v. Only used for OM right now
 def get_policies_and_h_for_states(key, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, obs_hist):
@@ -1329,20 +1327,6 @@ def eval_vs_fixed_strategy(key, trainstate_th, trainstate_val, strat="alld", sel
     score2 = score2.mean()
 
     return (score1, score2), None
-
-@jit
-def get_init_hidden_states():
-    h_p1, h_p2 = (
-        jnp.zeros((args.batch_size, args.hidden_size)),
-        jnp.zeros((args.batch_size, args.hidden_size))
-    )
-    h_v1, h_v2 = None, None
-    if use_baseline:
-        h_v1, h_v2 = (
-            jnp.zeros((args.batch_size, args.hidden_size)),
-            jnp.zeros((args.batch_size, args.hidden_size))
-        )
-    return h_p1, h_p2, h_v1, h_v2
 
 
 def inspect_ipd(trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2):
