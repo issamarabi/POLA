@@ -343,6 +343,39 @@ def get_init_hidden_states():
     return h_p1, h_p2, h_v1, h_v2
 
 
+###############################################################################
+#              Environment Rollout Helpers (N-step scanning)                  #
+###############################################################################
+
+@partial(jit, static_argnums=(9))
+def do_env_rollout(key, th1, th1_params, val1, val1_params, th2, th2_params, val2, val2_params, agent_for_state_history):
+    """
+    Performs a multi-step environment rollout for each of the batch_size parallel 
+    envs using a vmap of step() calls. Saves partial state history for the 
+    agent_of_interest (agent_for_state_history).
+    """
+    keys = jax.random.split(key, args.batch_size + 1)
+    key, env_subkeys = keys[0], keys[1:]
+    env_state, obsv = vec_env_reset(env_subkeys)
+    obs1 = obsv
+    obs2 = obsv
+    h_p1, h_p2, h_v1, h_v2 = get_init_hidden_states()
+    state_history = []
+    if agent_for_state_history == 2:
+        state_history.append(obs2)
+    else:
+        state_history.append(obs1)
+
+    # state_history stores the initial observation for the agent of interest.
+    # Additional observations from the rollout will be appended later. (strange but works)
+
+    init_scan_carry = (key, env_state, obs1, obs2, th1, th1_params, val1, val1_params,
+                       th2, th2_params, val2, val2_params, h_p1, h_v1, h_p2, h_v2)
+    final_scan_carry, aux = jax.lax.scan(env_step, init_scan_carry, None, args.rollout_len)
+
+    return final_scan_carry, aux, state_history
+
+
 # Same as before again, but now returning the h_p and h_v. Only used for OM right now
 def get_policies_and_h_for_states(key, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, obs_hist):
 
@@ -392,43 +425,6 @@ def get_policies_for_states_onebatch(key, th_p_trainstate, th_p_trainstate_param
 
     return cat_act_probs_list
 
-
-
-@partial(jit, static_argnums=(9))
-def do_env_rollout(key, trainstate_th1, trainstate_th1_params, trainstate_val1,
-             trainstate_val1_params,
-             trainstate_th2, trainstate_th2_params, trainstate_val2,
-             trainstate_val2_params, agent_for_state_history):
-    keys = jax.random.split(key, args.batch_size + 1)
-    key, env_subkeys = keys[0], keys[1:]
-
-    env_state, obsv = vec_env_reset(env_subkeys)
-
-    obs1 = obsv
-    obs2 = obsv
-
-    h_p1, h_p2, h_v1, h_v2 = get_init_hidden_states()
-
-    unfinished_state_history = []
-    if agent_for_state_history == 2:
-        unfinished_state_history.append(obs2)
-    else:
-        assert agent_for_state_history == 1
-        unfinished_state_history.append(obs1)
-
-    stuff = (key, env_state, obs1, obs2,
-             trainstate_th1, trainstate_th1_params, trainstate_val1,
-             trainstate_val1_params,
-             trainstate_th2, trainstate_th2_params, trainstate_val2,
-             trainstate_val2_params,
-             h_p1, h_v1, h_p2, h_v2)
-
-    stuff, aux = jax.lax.scan(env_step, stuff, None, args.rollout_len)
-
-    # unfinished_state_history contains just a single starting obs/state at this point
-    # THen the additional observations during the rollout are added on later
-    # This seems a bit weird but I guess it works. Not exactly sure why I structured it this way
-    return stuff, aux, unfinished_state_history
 
 # Do rollouts and calculate objectives for the inner agent (the other_agent)
 @partial(jit, static_argnums=(11))
