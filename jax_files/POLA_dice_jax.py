@@ -626,198 +626,128 @@ def inner_steps_plus_update_otheragent1(key, th1, th1_params, val1, val1_params,
     return th1_prime, val1_prime
 
 
-# Do rollouts and calculate objectives for the outer agent (the self_agent)
-@partial(jit, static_argnums=(11))
-def out_lookahead(key, trainstate_th1, trainstate_th1_params, trainstate_val1, trainstate_val1_params,
-                  trainstate_th2, trainstate_th2_params, trainstate_val2, trainstate_val2_params,
-                  old_trainstate_th, old_trainstate_val, self_agent=1):
+###############################################################################
+#    Outer-Loop Minimization for the "Self" Agent (POLA Outer Step)           #
+###############################################################################
 
-    stuff, aux, unfinished_state_history_for_kl_div = do_env_rollout(key, trainstate_th1,
-                                                           trainstate_th1_params,
-                                                           trainstate_val1,
-                                                           trainstate_val1_params,
-                                                           trainstate_th2,
-                                                           trainstate_th2_params,
-                                                           trainstate_val2,
-                                                           trainstate_val2_params,
-                                                           agent_for_state_history=self_agent)
+@partial(jit, static_argnums=(11))
+def out_lookahead(key, th1, th1_params, val1, val1_params,
+                  th2, th2_params, val2, val2_params,
+                  old_th, old_val, self_agent=1):
+    """
+    The "outer" objective for self_agent. We do a rollout, sum the DiCE objective, 
+    add a KL penalty wrt. old parameters (POLA). 
+    """
+    final_carry, aux, partial_state_hist = do_env_rollout(
+        key, th1, th1_params, val1, val1_params,
+        th2, th2_params, val2, val2_params, agent_for_state_history=self_agent)
 
     aux1, aux2, aux_info = aux
-    state_history_for_kl_div = unfinished_state_history_for_kl_div
-
-    # This is equivalent to just redeclaring stuff like trainstate_th1_params = trainstate_th1_params
-    # Because it is unmodified from the env rollouts.
-    # So this redeclaration is unnecessary (but also shouldn't have any effect)
-    key, env_state, obs1, obs2, \
-    trainstate_th1, trainstate_th1_params, trainstate_val1, trainstate_val1_params,\
-    trainstate_th2, trainstate_th2_params, trainstate_val2, trainstate_val2_params,\
-    h_p1, h_v1, h_p2, h_v2 = stuff
+    (key_final, env_state, obs1, obs2,
+     _, _, _, _, _, _, _, _, h_p1, h_v1, h_p2, h_v2) = final_carry
 
     if self_agent == 1:
-        cat_act_probs1_list, obs1_list, lp1_list, lp2_list, v1_list, r1_list, a1_list, a2_list = aux1
-
-        # cat_act_probs_self.extend(cat_act_probs1_list)
-        state_history_for_kl_div.extend(obs1_list)
-
-        key, subkey = jax.random.split(key)
-        # act just to get the final state values
-
-        act_args1 = (subkey, obs1, trainstate_th1, trainstate_th1_params,
-                     trainstate_val1, trainstate_val1_params, h_p1, h_v1)
-        stuff1, aux1 = act(act_args1, None)
-        a1, lp1, v1, h_p1, h_v1, cat_act_probs1, logits1 = aux1
-
-        end_state_v = v1
-        objective = dice_objective_plus_value_loss(self_logprobs=lp1_list,
-                                   other_logprobs=lp2_list,
-                                   rewards=r1_list, values=v1_list,
-                                   end_state_v=end_state_v)
-        # print(f"Agent 1 episode return avg {r1_list.sum(axis=0).mean()}")
+        cat_probs1_list, obs1_list, lp1_list, lp2_list, v1_list, r1_list, a1_list, a2_list = aux1
+        partial_state_hist.extend(obs1_list)
+        # final step val
+        key_final, subkey = jax.random.split(key_final, 2)
+        act_args1 = (subkey, obs1, th1, th1_params, val1, val1_params, h_p1, h_v1)
+        _, (a1_end, lp1_end, v1_end, _, _, _, _) = act(act_args1, None)
+        end_state_v = v1_end
+        objective = dice_objective_plus_value_loss(lp1_list, lp2_list, r1_list, v1_list, end_state_v)
+        # Collect probabilities, old probabilities
+        key_final, subkey = jax.random.split(key_final, 2)
+        self_pol_probs = get_policies_for_states(subkey, th1, th1_params, val1, val1_params, partial_state_hist)
+        self_pol_probs_old = get_policies_for_states(subkey, old_th, old_th.params,
+                                                     old_val, old_val.params, partial_state_hist)
     else:
-        assert self_agent == 2
-        cat_act_probs2_list, obs2_list, lp2_list, lp1_list, v2_list, r2_list, a2_list, a1_list = aux2
-
-        state_history_for_kl_div.extend(obs2_list)
-
-        key, subkey = jax.random.split(key)
-        # act just to get the final state values
-        act_args2 = (subkey, obs2, trainstate_th2, trainstate_th2_params,
-                     trainstate_val2, trainstate_val2_params, h_p2, h_v2)
-        stuff2, aux2 = act(act_args2, None)
-        a2, lp2, v2, h_p2, h_v2, cat_act_probs2, logits2 = aux2
-
-        end_state_v = v2
-        objective = dice_objective_plus_value_loss(self_logprobs=lp2_list,
-                                   other_logprobs=lp1_list,
-                                   rewards=r2_list, values=v2_list,
-                                   end_state_v=end_state_v)
-        # print(f"Agent 2 episode return avg {r2_list.sum(axis=0).mean()}")
-
-    key, sk1, sk2 = jax.random.split(key, 3)
-
-
-    if self_agent == 1:
-        self_pol_probs = get_policies_for_states(sk1, trainstate_th1,
-                                                 trainstate_th1_params,
-                                                 trainstate_val1,
-                                                 trainstate_val1_params,
-                                                 state_history_for_kl_div)
-    else:
-        self_pol_probs = get_policies_for_states(sk1,
-                                                 trainstate_th2,
-                                                 trainstate_th2_params,
-                                                 trainstate_val2,
-                                                 trainstate_val2_params,
-                                                 state_history_for_kl_div)
-
-    self_pol_probs_ref = get_policies_for_states(sk2,
-                                                        old_trainstate_th,
-                                                        old_trainstate_th.params,
-                                                        old_trainstate_val,
-                                                        old_trainstate_val.params,
-                                                        state_history_for_kl_div)
+        cat_probs2_list, obs2_list, lp2_list, lp1_list, v2_list, r2_list, a2_list, a1_list = aux2
+        partial_state_hist.extend(obs2_list)
+        key_final, subkey = jax.random.split(key_final, 2)
+        act_args2 = (subkey, obs2, th2, th2_params, val2, val2_params, h_p2, h_v2)
+        _, (a2_end, lp2_end, v2_end, _, _, _, _) = act(act_args2, None)
+        end_state_v = v2_end
+        objective = dice_objective_plus_value_loss(lp2_list, lp1_list, r2_list, v2_list, end_state_v)
+        key_final, subkey = jax.random.split(key_final, 2)
+        self_pol_probs = get_policies_for_states(subkey, th2, th2_params, val2, val2_params, partial_state_hist)
+        self_pol_probs_old = get_policies_for_states(subkey, old_th, old_th.params,
+                                                     old_val, old_val.params, partial_state_hist)
 
     if args.rev_kl:
-        kl_div = rev_kl_div_jax(self_pol_probs, self_pol_probs_ref)
+        kl_div_term = rev_kl_div_jax(self_pol_probs, self_pol_probs_old)
     else:
-        kl_div = kl_div_jax(self_pol_probs, self_pol_probs_ref)
+        kl_div_term = kl_div_jax(self_pol_probs, self_pol_probs_old)
 
-    # return grad
-    return objective + args.outer_beta * kl_div, state_history_for_kl_div
-
-
+    return objective + args.outer_beta * kl_div_term, partial_state_hist
 
 @jit
-def one_outer_step_objective_selfagent1(key, trainstate_th1_copy, trainstate_th1_copy_params, trainstate_val1_copy, trainstate_val1_copy_params,
-                             trainstate_th2_copy, trainstate_th2_copy_params, trainstate_val2_copy, trainstate_val2_copy_params,
-                             trainstate_th_ref, trainstate_val_ref):
-    self_agent = 1
-    other_agent = 2
+def one_outer_step_objective_selfagent1(
+    key, th1_copy, th1_copy_params, val1_copy, val1_copy_params,
+    th2_copy, th2_copy_params, val2_copy, val2_copy_params,
+    th_ref, val_ref
+):
+    """
+    Single outer-step objective for agent 1: 
+    (1) run the inner step for agent 2, 
+    (2) evaluate final objective for agent 1's vantage point.
+    """
+    # 1) Inner step: agent 2 updates
     key, subkey = jax.random.split(key)
-    trainstate_th2_after_inner_steps, trainstate_val2_after_inner_steps = \
-        inner_steps_plus_update_otheragent2(subkey,
-                                trainstate_th1_copy, trainstate_th1_copy_params,
-                                trainstate_val1_copy,
-                                trainstate_val1_copy_params,
-                                trainstate_th2_copy, trainstate_th2_copy_params,
-                                trainstate_val2_copy,
-                                trainstate_val2_copy_params,
-                                trainstate_th2_copy, trainstate_val2_copy
-                                )
-    # It's a bit weird to have trainstate_th2_copy show up twice in the above,
-    # but I believe it ends up all working out fine because inner_steps_plus_update
-    # makes a copy of trainstate_th2_copy before taking updates on it
-    # so that won't affect the second trainstate_th2_copy which is used as the reference
-    # point for KL div.
-
+    th2_after_inner, val2_after_inner = inner_steps_plus_update_otheragent2(
+        subkey, th1_copy, th1_copy_params, val1_copy, val1_copy_params,
+        th2_copy, th2_copy_params, val2_copy, val2_copy_params,
+        th2_copy, val2_copy
+    )
+    # 2) Evaluate agent 1's objective
     if use_baseline:
-        objective, state_hist_from_rollout = out_lookahead(key, trainstate_th1_copy,
-                                  trainstate_th1_copy_params,
-                                  trainstate_val1_copy,
-                                  trainstate_val1_copy_params,
-                                  trainstate_th2_after_inner_steps,
-                                  trainstate_th2_after_inner_steps.params,
-                                  trainstate_val2_after_inner_steps,
-                                  trainstate_val2_after_inner_steps.params,
-                                  trainstate_th_ref,
-                                  trainstate_val_ref,
-                                  self_agent=self_agent)
+        objective, state_hist = out_lookahead(
+            key, th1_copy, th1_copy_params, val1_copy, val1_copy_params,
+            th2_after_inner, th2_after_inner.params,
+            val2_after_inner, val2_after_inner.params,
+            th_ref, val_ref, self_agent=1
+        )
     else:
-        objective, state_hist_from_rollout = out_lookahead(key, trainstate_th1_copy,
-                                  trainstate_th1_copy_params,
-                                  None, None,
-                                  trainstate_th2_after_inner_steps,
-                                  trainstate_th2_after_inner_steps.params,
-                                  None, None,
-                                  trainstate_th_ref,
-                                  trainstate_val_ref,
-                                  self_agent=self_agent)
-
-    return objective, state_hist_from_rollout
-
+        objective, state_hist = out_lookahead(
+            key, th1_copy, th1_copy_params, None, None,
+            th2_after_inner, th2_after_inner.params, None, None,
+            th_ref, val_ref, self_agent=1
+        )
+    return objective, state_hist
 
 @jit
-def one_outer_step_objective_selfagent2(key, trainstate_th1_copy, trainstate_th1_copy_params, trainstate_val1_copy, trainstate_val1_copy_params,
-                             trainstate_th2_copy, trainstate_th2_copy_params, trainstate_val2_copy, trainstate_val2_copy_params,
-                             trainstate_th_ref, trainstate_val_ref):
-    self_agent = 2
-    other_agent = 1
+def one_outer_step_objective_selfagent2(
+    key, th1_copy, th1_copy_params, val1_copy, val1_copy_params,
+    th2_copy, th2_copy_params, val2_copy, val2_copy_params,
+    th_ref, val_ref
+):
+    """
+    Single outer-step objective for agent 2: 
+    (1) run the inner step for agent 1,
+    (2) evaluate final objective for agent 2's vantage point.
+    """
+    # 1) Inner step: agent 1 updates
     key, subkey = jax.random.split(key)
-    trainstate_th1_after_inner_steps, trainstate_val1_after_inner_steps = \
-        inner_steps_plus_update_otheragent1(subkey,
-                                trainstate_th1_copy, trainstate_th1_copy_params,
-                                trainstate_val1_copy,
-                                trainstate_val1_copy_params,
-                                trainstate_th2_copy, trainstate_th2_copy_params,
-                                trainstate_val2_copy,
-                                trainstate_val2_copy_params,
-                                trainstate_th1_copy, trainstate_val1_copy)
-
-
+    th1_after_inner, val1_after_inner = inner_steps_plus_update_otheragent1(
+        subkey, th1_copy, th1_copy_params, val1_copy, val1_copy_params,
+        th2_copy, th2_copy_params, val2_copy, val2_copy_params,
+        th1_copy, val1_copy
+    )
+    # 2) Evaluate agent 2's objective
     if use_baseline:
-        objective, state_hist_from_rollout = out_lookahead(key, trainstate_th1_after_inner_steps,
-                                  trainstate_th1_after_inner_steps.params,
-                                  trainstate_val1_after_inner_steps,
-                                  trainstate_val1_after_inner_steps.params,
-                                  trainstate_th2_copy,
-                                  trainstate_th2_copy_params,
-                                  trainstate_val2_copy,
-                                  trainstate_val2_copy_params,
-                                  trainstate_th_ref,
-                                  trainstate_val_ref,
-                                  self_agent=self_agent)
+        objective, state_hist = out_lookahead(
+            key, th1_after_inner, th1_after_inner.params,
+            val1_after_inner, val1_after_inner.params,
+            th2_copy, th2_copy_params, val2_copy, val2_copy_params,
+            th_ref, val_ref, self_agent=2
+        )
     else:
-        objective, state_hist_from_rollout = out_lookahead(key, trainstate_th1_after_inner_steps,
-                                  trainstate_th1_after_inner_steps.params,
-                                  None, None,
-                                  trainstate_th2_copy,
-                                  trainstate_th2_copy_params,
-                                  None, None,
-                                  trainstate_th_ref,
-                                  trainstate_val_ref,
-                                  self_agent=self_agent)
+        objective, state_hist = out_lookahead(
+            key, th1_after_inner, th1_after_inner.params, None, None,
+            th2_copy, th2_copy_params, None, None,
+            th_ref, val_ref, self_agent=2
+        )
+    return objective, state_hist
 
-    return objective, state_hist_from_rollout
 
 @jit
 def one_outer_step_update_selfagent1(stuff, unused):
