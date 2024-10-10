@@ -749,73 +749,60 @@ def one_outer_step_objective_selfagent2(
     return objective, state_hist
 
 
-@jit
-def one_outer_step_update_selfagent1(stuff, unused):
-    key, trainstate_th1_copy, trainstate_val1_copy, trainstate_th2_copy, trainstate_val2_copy, \
-    trainstate_th_ref, trainstate_val_ref = stuff
-
-    key, subkey = jax.random.split(key)
-
-    obj_grad_fn = jax.grad(one_outer_step_objective_selfagent1, argnums=[2, 4], has_aux=True)
-
-    (grad_th, grad_v), state_hist_from_rollout = obj_grad_fn(subkey,
-                                  trainstate_th1_copy,
-                                  trainstate_th1_copy.params,
-                                  trainstate_val1_copy,
-                                  trainstate_val1_copy.params,
-                                  trainstate_th2_copy,
-                                  trainstate_th2_copy.params,
-                                  trainstate_val2_copy,
-                                  trainstate_val2_copy.params,
-                                  trainstate_th_ref, trainstate_val_ref)
-
-    trainstate_th1_copy = trainstate_th1_copy.apply_gradients(grads=grad_th)
-
-    if use_baseline:
-        trainstate_val1_copy = trainstate_val1_copy.apply_gradients(grads=grad_v)
-
-    # Since we only need the final trainstate, and not every trainstate every step of the way, no need for aux here
-    stuff = (key, trainstate_th1_copy,  trainstate_val1_copy, trainstate_th2_copy,  trainstate_val2_copy,
-    trainstate_th_ref, trainstate_val_ref)
-    aux = state_hist_from_rollout
-
-    return stuff, aux
+###############################################################################
+#                  JAX Scan Over Outer Steps (POLA Update)                    #
+###############################################################################
 
 @jit
-def one_outer_step_update_selfagent2(stuff, unused):
-    key, trainstate_th1_copy, trainstate_val1_copy, \
-    trainstate_th2_copy, trainstate_val2_copy,\
-    trainstate_th_ref, trainstate_val_ref = stuff
-
-
+def one_outer_step_update_selfagent1(scan_carry, _):
+    """
+    For agent 1's outer step update: 
+    1) compute gradient of the objective wrt. agent 1's params,
+    2) apply the gradient step,
+    3) return updated agent 1 trainstates.
+    """
+    (key, th1_copy, val1_copy, th2_copy, val2_copy, th_ref, val_ref) = scan_carry
     key, subkey = jax.random.split(key)
 
-    obj_grad_fn = jax.grad(one_outer_step_objective_selfagent2, argnums=[6, 8], has_aux=True)
+    grad_fn = jax.grad(one_outer_step_objective_selfagent1, argnums=[2, 4], has_aux=True)
+    (grad_th, grad_val), state_hist = grad_fn(
+        subkey, th1_copy, th1_copy.params, val1_copy, val1_copy.params,
+        th2_copy, th2_copy.params, val2_copy, val2_copy.params, th_ref, val_ref
+    )
+    th1_copy_updated = th1_copy.apply_gradients(grads=grad_th)
+    val1_copy_updated = val1_copy.apply_gradients(grads=grad_val) if use_baseline else val1_copy
 
-    (grad_th, grad_v), state_hist_from_rollout = obj_grad_fn(subkey,
-                                  trainstate_th1_copy,
-                                  trainstate_th1_copy.params,
-                                  trainstate_val1_copy,
-                                  trainstate_val1_copy.params,
-                                  trainstate_th2_copy,
-                                  trainstate_th2_copy.params,
-                                  trainstate_val2_copy,
-                                  trainstate_val2_copy.params,
-                                  trainstate_th_ref, trainstate_val_ref)
+    # Only final trainstate returned; no need for aux data.
+    updated_scan_carry = (
+        key, th1_copy_updated, val1_copy_updated, th2_copy, val2_copy, th_ref, val_ref
+    )
+    return updated_scan_carry, state_hist
 
-    trainstate_th2_copy = trainstate_th2_copy.apply_gradients(grads=grad_th)
+@jit
+def one_outer_step_update_selfagent2(scan_carry, _):
+    """
+    For agent 2's outer step update. 
+    1) compute gradient wrt. agent 2's params,
+    2) apply step,
+    3) return updated trainstates for agent 2.
+    """
+    (key, th1_copy, val1_copy, th2_copy, val2_copy, th_ref, val_ref) = scan_carry
+    key, subkey = jax.random.split(key)
 
-    if use_baseline:
-        trainstate_val2_copy = trainstate_val2_copy.apply_gradients(grads=grad_v)
+    grad_fn = jax.grad(one_outer_step_objective_selfagent2, argnums=[6, 8], has_aux=True)
+    (grad_th, grad_val), state_hist = grad_fn(
+        subkey, th1_copy, th1_copy.params, val1_copy, val1_copy.params,
+        th2_copy, th2_copy.params, val2_copy, val2_copy.params, th_ref, val_ref
+    )
+    th2_copy_updated = th2_copy.apply_gradients(grads=grad_th)
+    val2_copy_updated = val2_copy.apply_gradients(grads=grad_val) if use_baseline else val2_copy
 
-    # Since we only need the final trainstate, and not every trainstate every step of the way, no need for aux here
-    stuff = (
-    key, trainstate_th1_copy, trainstate_val1_copy,
-    trainstate_th2_copy, trainstate_val2_copy,
-    trainstate_th_ref, trainstate_val_ref)
-    aux = state_hist_from_rollout
+    updated_scan_carry = (
+        key, th1_copy, val1_copy, th2_copy_updated, val2_copy_updated, th_ref, val_ref
+    )
+    return updated_scan_carry, state_hist
 
-    return stuff, aux
+
 
 @jit
 def eval_vs_alld_selfagent1(stuff, unused):
