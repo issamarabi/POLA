@@ -376,30 +376,6 @@ def do_env_rollout(key, th1, th1_params, val1, val1_params, th2, th2_params, val
     return final_scan_carry, aux, state_history
 
 
-# Same as before again, but now returning the h_p and h_v. Only used for OM right now
-def get_policies_and_h_for_states(key, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, obs_hist):
-
-    h_p = jnp.zeros((args.batch_size, args.hidden_size))
-    h_v = None
-    if use_baseline:
-        h_v = jnp.zeros((args.batch_size, args.hidden_size))
-
-    key, subkey = jax.random.split(key)
-
-    act_args = (subkey, th_p_trainstate, th_p_trainstate_params,
-                th_v_trainstate, th_v_trainstate_params, h_p, h_v)
-    # Note that I am scanning using xs = obs_hist. Then the scan should work through the
-    # array of obs.
-    obs_hist_for_scan = jnp.stack(obs_hist[:args.rollout_len], axis=0) # skips final obs (but includes init/start state/obs)
-
-    act_args, aux_lists = jax.lax.scan(act_w_iter_over_obs, act_args, obs_hist_for_scan, args.rollout_len)
-    # act_args, aux_lists = jax.lax.scan(act_w_iter_over_obs, act_args, obs_hist_for_scan, obs_hist_for_scan.shape[0])
-
-    a_list, lp_list, v_list, h_p_list, h_v_list, cat_act_probs_list, logits_list = aux_lists
-
-
-    return cat_act_probs_list, h_p_list, h_v_list
-
 # Do for only a single batch; only used for testing/inspection
 @jit
 def get_policies_for_states_onebatch(key, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, obs_hist):
@@ -1205,249 +1181,212 @@ def get_init_trainstates(key, action_size, input_size):
     return trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2
 
 
+###############################################################################
+#                   Opponent Modeling: Supervised Approach                    #
+###############################################################################
+
 @jit
-def get_c_e_for_om(key, om_trainstate_th, om_trainstate_th_params, om_trainstate_val, om_trainstate_val_params, other_state_history, other_act_history):
+def get_c_e_for_om(key, om_p, om_p_params, om_v, om_v_params,
+                   other_state_history, other_act_history):
+    """
+    Opponent model's cross-entropy loss:
+    - The "policy" is treated as a classifier to predict the actions of the other agent based on observed states.
+    - The cross-entropy loss is computed using the other agent's actions (one-hot vectors) as target labels.
+    - This effectively trains the opponent model's policy to mimic the other agent's behavior.
+
+    Note:
+    - The term `-p * log(p)` from the KL divergence drops out since `p` represents the target one-hot vectors (0 or 1).
+    - Only the term `-p * log(q)` contributes to the gradient, aligning with standard cross-entropy computation.
+    """
     key, subkey = jax.random.split(key)
-    curr_pol_probs, h_p_list, h_v_list = get_policies_and_h_for_states(subkey, om_trainstate_th,
-                                             om_trainstate_th_params,
-                                             om_trainstate_val,
-                                             om_trainstate_val_params,
-                                             other_state_history)
-    # KL div: p log p - p log q
-    # use p for target, since it has 0 and 1
-    # Then p log p has no deriv so can drop it, with respect to model
-    # then -p log q
+    # Generate policy probabilities and hidden states for the other agent's observed states
+    pol_probs, h_p_list, h_v_list = get_policies_and_h_for_states(subkey, om_p, om_p_params, om_v, om_v_params, other_state_history)
 
-    # Calculate targets based on the action history (other act history)
-    # Essentially treat the one hot vector of actions as a class label, and then run supervised learning
-
-    c_e_loss = - (other_act_history * jnp.log(curr_pol_probs)).sum(
-        axis=-1).mean()
-
-
+    # Cross-entropy loss: the policy's predicted probabilities (q) are evaluated against the target actions (one-hot encoded p)
+    c_e_loss = -(other_act_history * jnp.log(pol_probs)).sum(axis=-1).mean()
     return c_e_loss, (h_p_list, h_v_list)
 
-# This is just the same value loss as normal
-# For OM we are assuming ability to observe other agents' actions and rewards (or alternatively, you assume the rewards are symmetrical to yours)
 @jit
-def get_val_loss_for_om(key, om_trainstate_th, om_trainstate_th_params, om_trainstate_val, om_trainstate_val_params,
+def get_val_loss_for_om(key, om_p, om_p_params, om_v, om_v_params,
                         other_state_history, other_act_history, rewards, end_state_v):
-    key, subkey = jax.random.split(key)
-    curr_pol_probs, curr_vals = get_policies_and_values_for_states(subkey, om_trainstate_th,
-                                             om_trainstate_th_params,
-                                             om_trainstate_val,
-                                             om_trainstate_val_params,
-                                             other_state_history)
-    val_loss = value_loss(rewards, curr_vals, end_state_v)
+    pol_probs, pol_vals = get_policies_and_values_for_states(key, om_p, om_p_params, om_v, om_v_params, other_state_history)
+    val_loss_ = value_loss(rewards, pol_vals, end_state_v)
+    return val_loss_
 
-    return val_loss
+def get_policies_and_h_for_states(key, train_p, train_p_params, train_v, train_v_params, obs_hist):
+    """
+    Variation of get_policies_for_states that also returns the hidden states at each step 
+    (used for the OM's value function update).
+    """
+    h_p_init = jnp.zeros((args.batch_size, args.hidden_size))
+    h_v_init = jnp.zeros((args.batch_size, args.hidden_size)) if use_baseline else None
+    init_scan_carry = (key, train_p, train_p_params, train_v, train_v_params, h_p_init, h_v_init)
+    obs_hist_for_scan = jnp.stack(obs_hist[:args.rollout_len], axis=0)
+    final_scan_carry, aux_lists = jax.lax.scan(act_w_iter_over_obs, init_scan_carry, obs_hist_for_scan, args.rollout_len)
+    (_, _, _, _, _, _, _), (a_list, lp_list, v_list, h_p_list, h_v_list, cat_probs_list, logits_list) = (final_scan_carry, aux_lists)
+    return cat_probs_list, h_p_list, h_v_list
 
 @jit
-def opp_model_selfagent1_single_batch(inputstuff, unused ):
-    key, trainstate_th1, trainstate_val1, true_other_trainstate_th, true_other_trainstate_val, om_trainstate_th, om_trainstate_val = inputstuff
+def opp_model_selfagent1_single_batch(scan_carry, _):
+    """
+    One "batch" of environment interactions for agent1 + OM training.
+    """
+    (key, train_th1, train_val1, true_th2, true_val2,
+     om_th2, om_val2) = scan_carry
     key, subkey = jax.random.split(key)
 
-    stuff, aux, unfinished_state_history = do_env_rollout(subkey,
-                                                          trainstate_th1,
-                                                          trainstate_th1.params,
-                                                          trainstate_val1,
-                                                          trainstate_val1.params,
-                                                          true_other_trainstate_th,
-                                                          true_other_trainstate_th.params,
-                                                          true_other_trainstate_val,
-                                                          true_other_trainstate_val.params,
-                                                          agent_for_state_history=2)
-
-    key, env_state, obs1, obs2, \
-    _, _, _, _, \
-    _, _, _, _, \
-    h_p1, h_v1, h_p2, h_v2 = stuff
-
-    aux1, aux2, aux_info = aux
-
-    cat_act_probs2_list, obs2_list, lp2_list, lp1_list, v2_list, r2_list, a2_list, a1_list = aux2
-
-    unfinished_state_history.extend(obs2_list)
-    other_state_history = unfinished_state_history
-
+    final_carry, aux_data, state_hist = do_env_rollout(
+        subkey, train_th1, train_th1.params, train_val1, train_val1.params,
+        true_th2, true_th2.params, true_val2, true_val2.params,
+        agent_for_state_history=2
+    )
+    _, (aux2_cat_probs, obs2_list, lp2_list, lp1_list, v2_list, r2_list,
+        a2_list, a1_list), _ = aux_data
+    state_hist.extend(obs2_list)
+    other_state_history = state_hist
     other_act_history = a2_list
-    other_rew_history = r2_list
+    other_act_history_1hot = jax.nn.one_hot(other_act_history, action_size)
 
-    # I can do multiple "batches"
-    # where repeating the below would be the same as collecting one big batch of environment interaction
-
-    other_act_history = jax.nn.one_hot(other_act_history, action_size)
-
+    # Cross-entropy grad
     om_grad_fn = jax.grad(get_c_e_for_om, argnums=2, has_aux=True)
-    if use_baseline:
-        om_val_grad_fn = jax.grad(get_val_loss_for_om, argnums=4)
+    # Value grad
+    om_val_grad_fn = jax.grad(get_val_loss_for_om, argnums=4) if use_baseline else None
 
-    # This repeats training on one batch (one set of rollouts)
-    for opp_model_iter in range(args.opp_model_steps_per_batch):
-
-        key, subkey = jax.random.split(key)
-        grad_th, h_lists = om_grad_fn(subkey, om_trainstate_th, om_trainstate_th.params,
-                             om_trainstate_val, om_trainstate_val.params,
-                             other_state_history, other_act_history)
+    for _ in range(args.opp_model_steps_per_batch):
+        key, subkey_ce = jax.random.split(key)
+        grad_th2, h_lists = om_grad_fn(
+            subkey_ce, om_th2, om_th2.params, om_val2, om_val2.params,
+            other_state_history, other_act_history_1hot
+        )
         h_p_list, h_v_list = h_lists
-
-        om_trainstate_th = om_trainstate_th.apply_gradients(grads=grad_th)
-
-
+        om_th2 = om_th2.apply_gradients(grads=grad_th2)
         if use_baseline:
-            # act just to get the final state values
-            key, subkey = jax.random.split(key)
+            key, subkey_val = jax.random.split(key)
+            act_args2 = (subkey_val,
+                         final_carry[3],  # obs2
+                         om_th2, om_th2.params,
+                         om_val2, om_val2.params,
+                         h_p_list[-1], h_v_list[-1])
+            _, aux2_act = act(act_args2, None)
+            _, _, v2_end, _, _, _, _ = aux2_act
+            grad_v2 = om_val_grad_fn(subkey_val,
+                                     om_th2, om_th2.params,
+                                     om_val2, om_val2.params,
+                                     other_state_history,
+                                     other_act_history_1hot,
+                                     r2_list, v2_end)
+            om_val2 = om_val2.apply_gradients(grads=grad_v2)
 
-            # For OM we should not be using the hidden states of the other agent's RNN
-            # This only affects the OM value function though, so shouldn't make a huge difference in terms of the actual policies learned.
-            act_args2 = (
-                subkey, obs2, om_trainstate_th, om_trainstate_th.params,
-                om_trainstate_val, om_trainstate_val.params, h_p_list[-1], h_v_list[-1])
-            stuff2, aux2 = act(act_args2, None)
-            a2, lp2, v2, h_p2, h_v2, cat_act_probs2, logits2 = aux2
-
-            end_state_v = v2
-            grad_v = om_val_grad_fn(subkey, om_trainstate_th,
-                                    om_trainstate_th.params, om_trainstate_val,
-                                    om_trainstate_val.params,
-                                    other_state_history, other_act_history,
-                                    other_rew_history, end_state_v)
-
-            om_trainstate_val = om_trainstate_val.apply_gradients(
-                grads=grad_v)
-
-    inputstuff = (key, trainstate_th1, trainstate_val1, true_other_trainstate_th, true_other_trainstate_val, om_trainstate_th, om_trainstate_val)
-    aux = None
-    return inputstuff, aux
+    return (key, train_th1, train_val1, true_th2, true_val2, om_th2, om_val2), None
 
 @jit
-def opp_model_selfagent2_single_batch(inputstuff, unused ):
-    key, true_other_trainstate_th, true_other_trainstate_val, trainstate_th2, trainstate_val2, om_trainstate_th, om_trainstate_val = inputstuff
-
+def opp_model_selfagent2_single_batch(scan_carry, _):
+    """
+    One "batch" of environment interactions for agent2 + OM training.
+    """
+    (key, true_th1, true_val1, train_th2, train_val2,
+     om_th1, om_val1) = scan_carry
     key, subkey = jax.random.split(key)
 
-    stuff, aux, unfinished_state_history = do_env_rollout(subkey,
-                                                          true_other_trainstate_th,
-                                                          true_other_trainstate_th.params,
-                                                          true_other_trainstate_val,
-                                                          true_other_trainstate_val.params,
-                                                          trainstate_th2,
-                                                          trainstate_th2.params,
-                                                          trainstate_val2,
-                                                          trainstate_val2.params,
-                                                          agent_for_state_history=1)
-
-    key, env_state, obs1, obs2, \
-    _, _, _, _, \
-    _, _, _, _, \
-    h_p1, h_v1, h_p2, h_v2 = stuff
-
-    aux1, aux2, aux_info = aux
-
-    cat_act_probs1_list, obs1_list, lp1_list, lp2_list, v1_list, r1_list, a1_list, a2_list = aux1
-
-    unfinished_state_history.extend(obs1_list)
-    other_state_history = unfinished_state_history
-
+    final_carry, aux_data, state_hist = do_env_rollout(
+        subkey, true_th1, true_th1.params, true_val1, true_val1.params,
+        train_th2, train_th2.params, train_val2, train_val2.params,
+        agent_for_state_history=1
+    )
+    (aux1_cat_probs, obs1_list, lp1_list, lp2_list, v1_list, r1_list,
+     a1_list, a2_list), _, _ = aux_data
+    state_hist.extend(obs1_list)
+    other_state_history = state_hist
     other_act_history = a1_list
-    other_rew_history = r1_list
-
-    # I can do multiple "batches"
-    # where repeating the below would be the same as collecting one big batch of environment interaction
-
-    other_act_history = jax.nn.one_hot(other_act_history, action_size)
+    other_act_history_1hot = jax.nn.one_hot(other_act_history, action_size)
 
     om_grad_fn = jax.grad(get_c_e_for_om, argnums=2, has_aux=True)
-    if use_baseline:
-        om_val_grad_fn = jax.grad(get_val_loss_for_om, argnums=4)
+    om_val_grad_fn = jax.grad(get_val_loss_for_om, argnums=4) if use_baseline else None
 
-    for opp_model_iter in range(args.opp_model_steps_per_batch):
-
-        key, subkey = jax.random.split(key)
-        grad_th, h_lists = om_grad_fn(subkey, om_trainstate_th, om_trainstate_th.params,
-                             om_trainstate_val, om_trainstate_val.params,
-                             other_state_history, other_act_history)
+    for _ in range(args.opp_model_steps_per_batch):
+        key, subkey_ce = jax.random.split(key)
+        grad_th1, h_lists = om_grad_fn(
+            subkey_ce, om_th1, om_th1.params, om_val1, om_val1.params,
+            other_state_history, other_act_history_1hot
+        )
         h_p_list, h_v_list = h_lists
-
-        om_trainstate_th = om_trainstate_th.apply_gradients(grads=grad_th)
+        om_th1 = om_th1.apply_gradients(grads=grad_th1)
 
         if use_baseline:
-            # act just to get the final state values
-            key, subkey = jax.random.split(key)
-            act_args1 = (
-                subkey, obs1, om_trainstate_th, om_trainstate_th.params,
-                om_trainstate_val, om_trainstate_val.params, h_p_list[-1], h_v_list[-1])
-            stuff1, aux1 = act(act_args1, None)
-            a1, lp1, v1, h_p1, h_v1, cat_act_probs1, logits1 = aux1
+            key, subkey_val = jax.random.split(key)
+            act_args1 = (subkey_val,
+                         final_carry[2],  # obs1
+                         om_th1, om_th1.params,
+                         om_val1, om_val1.params,
+                         h_p_list[-1], h_v_list[-1])
+            _, aux1_act = act(act_args1, None)
+            _, _, v1_end, _, _, _, _ = aux1_act
+            grad_v1 = om_val_grad_fn(
+                subkey_val, om_th1, om_th1.params, om_val1, om_val1.params,
+                other_state_history, other_act_history_1hot, r1_list, v1_end
+            )
+            om_val1 = om_val1.apply_gradients(grads=grad_v1)
 
-            end_state_v = v1
-            grad_v = om_val_grad_fn(subkey, om_trainstate_th,
-                                    om_trainstate_th.params, om_trainstate_val,
-                                    om_trainstate_val.params,
-                                    other_state_history, other_act_history,
-                                    other_rew_history, end_state_v)
-
-            om_trainstate_val = om_trainstate_val.apply_gradients(
-                grads=grad_v)
-
-    inputstuff = (key, true_other_trainstate_th, true_other_trainstate_val, trainstate_th2, trainstate_val2, om_trainstate_th, om_trainstate_val)
-    aux = None
-    return inputstuff, aux
-
-
+    return (key, true_th1, true_val1, train_th2, train_val2, om_th1, om_val1), None
 
 @jit
-def opp_model_selfagent1(key, trainstate_th1, trainstate_val1, true_other_trainstate_th, true_other_trainstate_val,
-              prev_om_trainstate_th, prev_om_trainstate_val):
-    # true_other_theta_p and true_other_theta_v used only in the collection of data (rollouts in the environment)
-    # so then this is not cheating. We do not assume access to other agent policy parameters (at least not direct, white box access)
-    # We assume ability to collect trajectories through rollouts/play with the other agent in the environment
-    # Essentially when using OM, we are now no longer doing dice update on the trajectories collected directly (which requires parameter access)
-    # instead we collect the trajectories first, then build an OM, then rollout using OM and make DiCE/LOLA/POLA update based on that OM
-    # Instead of direct rollout using opponent true parameters and update based on that.
+def opp_model_selfagent1(key, th1, val1, true_th2, true_val2,
+                         prev_om_th2, prev_om_val2):
+    """
+    Updates agent1's opponent model for agent2 by collecting environment data 
+    without white-box access to agent2's parameters. Specifically:
+      1. We gather trajectories of agent1 interacting with agent2 (using agent2's 
+         'true' train states).
+      2. We train an opponent model (om_th2, om_val2) to mimic agent2's actions 
+         and optionally its value function by supervised learning.
 
-    # not sure why I created copies of the om instead of directly using it but I don't think it hurts...
-    # TODO May 31; try a few epochs with no copy and see if it's the same
+    This is achieved by:
+      - Creating new TrainState copies for om_th2, om_val2 from prev_om_th2, prev_om_val2.
+      - Repeatedly scanning over environment rollouts (opp_model_selfagent1_single_batch).
+      - Returning the updated opponent model train states.
 
-    # Here have prev_om trainstates be the get_init_trainstates on the first iter before the first opp model
-    om_trainstate_th = TrainState.create(apply_fn=prev_om_trainstate_th.apply_fn,
-                                       params=prev_om_trainstate_th.params,
-                                       tx=prev_om_trainstate_th.tx)
-    om_trainstate_val = TrainState.create(apply_fn=prev_om_trainstate_val.apply_fn,
-                                       params=prev_om_trainstate_val.params,
-                                       tx=prev_om_trainstate_val.tx)
-    key, subkey = jax.random.split(key)
-    stuff = (subkey, trainstate_th1, trainstate_val1, true_other_trainstate_th, true_other_trainstate_val, om_trainstate_th, om_trainstate_val)
-    stuff, aux = jax.lax.scan(opp_model_selfagent1_single_batch, stuff, None, args.opp_model_data_batches)
-    _, trainstate_th1, trainstate_val1, true_other_trainstate_th, true_other_trainstate_val, om_trainstate_th, om_trainstate_val = stuff
+    Args:
+        key: JAX PRNGKey for randomness.
+        th1, val1: Agent1's policy and value TrainStates.
+        true_th2, true_val2: The 'true' policy and value TrainStates for agent2, 
+                             used only for generating trajectories (not read directly).
+        prev_om_th2, prev_om_val2: The previously learned opponent model TrainStates 
+                                   for agent2's policy/value.
 
-    return om_trainstate_th, om_trainstate_val
+    Returns:
+        (om_th2, om_val2): Updated opponent model TrainStates for agent2.
+    """
 
-
+    om_th2 = TrainState.create(apply_fn=prev_om_th2.apply_fn,
+                               params=prev_om_th2.params,
+                               tx=prev_om_th2.tx)
+    om_val2 = TrainState.create(apply_fn=prev_om_val2.apply_fn,
+                                params=prev_om_val2.params,
+                                tx=prev_om_val2.tx)
+    scan_carry = (key, th1, val1, true_th2, true_val2, om_th2, om_val2)
+    scan_carry, _ = jax.lax.scan(
+        opp_model_selfagent1_single_batch, scan_carry, None, args.opp_model_data_batches
+    )
+    return scan_carry[5], scan_carry[6]  # om_th2, om_val2
 
 @jit
-def opp_model_selfagent2(key, true_other_trainstate_th, true_other_trainstate_val, trainstate_th2, trainstate_val2,
-              prev_om_trainstate_th, prev_om_trainstate_val):
-    # true_other_theta_p and true_other_theta_v used only in the collection of data (rollouts in the environment)
-    # so then this is not cheating. We do not assume access to other agent policy parameters (at least not direct, white box access)
-    # We assume ability to collect trajectories through rollouts/play with the other agent in the environment
-    # Essentially when using OM, we are now no longer doing dice update on the trajectories collected directly (which requires parameter access)
-    # instead we collect the trajectories first, then build an OM, then rollout using OM and make DiCE/LOLA/POLA update based on that OM
-    # Instead of direct rollout using opponent true parameters and update based on that.
-
-    # Here have prev_om trainstates be the get_init_trainstates on the first iter before the first opp model
-    om_trainstate_th = TrainState.create(apply_fn=prev_om_trainstate_th.apply_fn,
-                                       params=prev_om_trainstate_th.params,
-                                       tx=prev_om_trainstate_th.tx)
-    om_trainstate_val = TrainState.create(apply_fn=prev_om_trainstate_val.apply_fn,
-                                       params=prev_om_trainstate_val.params,
-                                       tx=prev_om_trainstate_val.tx)
-    key, subkey = jax.random.split(key)
-    stuff = (subkey, true_other_trainstate_th, true_other_trainstate_val, trainstate_th2, trainstate_val2, om_trainstate_th, om_trainstate_val)
-    stuff, aux = jax.lax.scan(opp_model_selfagent2_single_batch, stuff, None, args.opp_model_data_batches)
-    _, _, _, _, _, om_trainstate_th, om_trainstate_val = stuff
-
-    return om_trainstate_th, om_trainstate_val
+def opp_model_selfagent2(key, true_th1, true_val1, th2, val2,
+                         prev_om_th1, prev_om_val1):
+    """
+    For agent2's perspective: gather environment data with (true_th1, true_val1) vs (th2, val2),
+    then train an opponent model (om_th1, om_val1).
+    """
+    om_th1 = TrainState.create(apply_fn=prev_om_th1.apply_fn,
+                               params=prev_om_th1.params,
+                               tx=prev_om_th1.tx)
+    om_val1 = TrainState.create(apply_fn=prev_om_val1.apply_fn,
+                                params=prev_om_val1.params,
+                                tx=prev_om_val1.tx)
+    scan_carry = (key, true_th1, true_val1, th2, val2, om_th1, om_val1)
+    scan_carry, _ = jax.lax.scan(
+        opp_model_selfagent2_single_batch, scan_carry, None, args.opp_model_data_batches
+    )
+    return scan_carry[5], scan_carry[6]  # om_th1, om_val1
 
 
 
