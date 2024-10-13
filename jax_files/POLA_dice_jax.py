@@ -1074,113 +1074,6 @@ def inspect_ipd(trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2
 
 
 
-@jit
-def eval_progress(subkey, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2):
-    keys = jax.random.split(subkey, args.batch_size + 1)
-    key, env_subkeys = keys[0], keys[1:]
-    env_state, obsv = vec_env_reset(env_subkeys)
-    obs1 = obsv
-    obs2 = obsv
-    h_p1, h_p2, h_v1, h_v2 = get_init_hidden_states()
-    key, subkey = jax.random.split(key)
-    stuff = (subkey, env_state, obs1, obs2,
-             trainstate_th1, trainstate_th1.params, trainstate_val1,
-             trainstate_val1.params,
-             trainstate_th2, trainstate_th2.params, trainstate_val2,
-             trainstate_val2.params,
-             h_p1, h_v1, h_p2, h_v2)
-
-    stuff, aux = jax.lax.scan(env_step, stuff, None, args.rollout_len)
-    aux1, aux2, aux_info = aux
-
-    _, _, _, _, _, r1, _, _ = aux1
-    _, _, _, _, _, r2, _, _ = aux2
-
-    score1rec = []
-    score2rec = []
-
-    print("Eval vs Fixed Strategies:")
-    for strat in ["alld", "allc", "tft"]:
-        # print(f"Playing against strategy: {strat.upper()}")
-        key, subkey = jax.random.split(key)
-        score1, _ = eval_vs_fixed_strategy(subkey, trainstate_th1, trainstate_val1, strat, self_agent=1)
-        score1rec.append(score1[0])
-        # print(f"Agent 1 score: {score1[0]}")
-        key, subkey = jax.random.split(key)
-        score2, _ = eval_vs_fixed_strategy(subkey, trainstate_th2, trainstate_val2, strat, self_agent=2)
-        score2rec.append(score2[1])
-        # print(f"Agent 2 score: {score2[1]}")
-
-    score1rec = jnp.stack(score1rec)
-    score2rec = jnp.stack(score2rec)
-
-    avg_rew1 = r1.mean()
-    avg_rew2 = r2.mean()
-
-    if args.env == 'coin':
-        rr_matches, rb_matches, br_matches, bb_matches = aux_info
-        rr_matches_amount = rr_matches.sum(axis=0).mean()
-        rb_matches_amount = rb_matches.sum(axis=0).mean()
-        br_matches_amount = br_matches.sum(axis=0).mean()
-        bb_matches_amount = bb_matches.sum(axis=0).mean()
-        return avg_rew1, avg_rew2, rr_matches_amount, rb_matches_amount, br_matches_amount, bb_matches_amount, score1rec, score2rec
-
-    else:
-        return avg_rew1, avg_rew2, None, None, None, None, score1rec, score2rec
-
-
-def get_init_trainstates(key, action_size, input_size):
-    hidden_size = args.hidden_size
-
-    key, key_p1, key_v1, key_p2, key_v2 = jax.random.split(key, 5)
-
-    theta_p1 = RNN(num_outputs=action_size,
-                   num_hidden_units=hidden_size,
-                   layers_before_gru=args.layers_before_gru)
-    theta_v1 = RNN(num_outputs=1, num_hidden_units=hidden_size,
-                   layers_before_gru=args.layers_before_gru)
-
-    theta_p1_params = theta_p1.init(key_p1, jnp.ones(
-        [args.batch_size, input_size]), jnp.zeros(hidden_size))
-    theta_v1_params = theta_v1.init(key_v1, jnp.ones(
-        [args.batch_size, input_size]), jnp.zeros(hidden_size))
-
-    theta_p2 = RNN(num_outputs=action_size,
-                   num_hidden_units=hidden_size,
-                   layers_before_gru=args.layers_before_gru)
-    theta_v2 = RNN(num_outputs=1, num_hidden_units=hidden_size,
-                   layers_before_gru=args.layers_before_gru)
-
-    theta_p2_params = theta_p2.init(key_p2, jnp.ones(
-        [args.batch_size, input_size]), jnp.zeros(hidden_size))
-    theta_v2_params = theta_v2.init(key_v2, jnp.ones(
-        [args.batch_size, input_size]), jnp.zeros(hidden_size))
-
-    if args.optim.lower() == 'adam':
-        theta_optimizer = optax.adam(learning_rate=args.lr_out)
-        value_optimizer = optax.adam(learning_rate=args.lr_v)
-    elif args.optim.lower() == 'sgd':
-        theta_optimizer = optax.sgd(learning_rate=args.lr_out)
-        value_optimizer = optax.sgd(learning_rate=args.lr_v)
-    else:
-        raise Exception("Unknown or Not Implemented Optimizer")
-
-    trainstate_th1 = TrainState.create(apply_fn=theta_p1.apply,
-                                       params=theta_p1_params,
-                                       tx=theta_optimizer)
-    trainstate_val1 = TrainState.create(apply_fn=theta_v1.apply,
-                                        params=theta_v1_params,
-                                        tx=value_optimizer)
-    trainstate_th2 = TrainState.create(apply_fn=theta_p2.apply,
-                                       params=theta_p2_params,
-                                       tx=theta_optimizer)
-    trainstate_val2 = TrainState.create(apply_fn=theta_v2.apply,
-                                        params=theta_v2_params,
-                                        tx=value_optimizer)
-
-    return trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2
-
-
 ###############################################################################
 #                   Opponent Modeling: Supervised Approach                    #
 ###############################################################################
@@ -1388,6 +1281,124 @@ def opp_model_selfagent2(key, true_th1, true_val1, th2, val2,
     )
     return scan_carry[5], scan_carry[6]  # om_th1, om_val1
 
+
+
+###############################################################################
+#                           Main Training Loop                                #
+###############################################################################
+
+def get_init_trainstates(key, action_size_, input_size_):
+    """
+    Create initial (TrainState) for policy and value RNNs for each agent.
+    """
+    key, key_p1, key_v1, key_p2, key_v2 = jax.random.split(key, 5)
+
+    theta_p1 = RNN(num_outputs=action_size_,
+                   num_hidden_units=args.hidden_size,
+                   layers_before_gru=args.layers_before_gru)
+    theta_v1 = RNN(num_outputs=1,
+                   num_hidden_units=args.hidden_size,
+                   layers_before_gru=args.layers_before_gru)
+    theta_p2 = RNN(num_outputs=action_size_,
+                   num_hidden_units=args.hidden_size,
+                   layers_before_gru=args.layers_before_gru)
+    theta_v2 = RNN(num_outputs=1,
+                   num_hidden_units=args.hidden_size,
+                   layers_before_gru=args.layers_before_gru)
+
+    theta_p1_params = theta_p1.init(key_p1,
+                                    jnp.ones([args.batch_size, input_size_]),
+                                    jnp.zeros(args.hidden_size))
+    theta_v1_params = theta_v1.init(key_v1,
+                                    jnp.ones([args.batch_size, input_size_]),
+                                    jnp.zeros(args.hidden_size))
+    theta_p2_params = theta_p2.init(key_p2,
+                                    jnp.ones([args.batch_size, input_size_]),
+                                    jnp.zeros(args.hidden_size))
+    theta_v2_params = theta_v2.init(key_v2,
+                                    jnp.ones([args.batch_size, input_size_]),
+                                    jnp.zeros(args.hidden_size))
+
+    if args.optim.lower() == 'adam':
+        theta_optimizer = optax.adam(learning_rate=args.lr_out)
+        value_optimizer = optax.adam(learning_rate=args.lr_v)
+    elif args.optim.lower() == 'sgd':
+        theta_optimizer = optax.sgd(learning_rate=args.lr_out)
+        value_optimizer = optax.sgd(learning_rate=args.lr_v)
+    else:
+        raise Exception("Unknown or Not Implemented Optimizer")
+
+    trainstate_th1 = TrainState.create(
+        apply_fn=theta_p1.apply,
+        params=theta_p1_params,
+        tx=theta_optimizer
+    )
+    trainstate_val1 = TrainState.create(
+        apply_fn=theta_v1.apply,
+        params=theta_v1_params,
+        tx=value_optimizer
+    )
+    trainstate_th2 = TrainState.create(
+        apply_fn=theta_p2.apply,
+        params=theta_p2_params,
+        tx=theta_optimizer
+    )
+    trainstate_val2 = TrainState.create(
+        apply_fn=theta_v2.apply,
+        params=theta_v2_params,
+        tx=value_optimizer
+    )
+    return trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2
+
+@jit
+def eval_progress(subkey, th1, val1, th2, val2):
+    """
+    Quick environment rollout (single pass) + evaluation vs fixed strategies 
+    for diagnostics/logging.
+    """
+    keys = jax.random.split(subkey, args.batch_size + 1)
+    key, env_subkeys = keys[0], keys[1:]
+    env_state, obsv = vec_env_reset(env_subkeys)
+    obs1 = obsv
+    obs2 = obsv
+    h_p1, h_p2, h_v1, h_v2 = get_init_hidden_states()
+
+    init_scan_carry = (key, env_state, obs1, obs2,
+                       th1, th1.params, val1, val1.params,
+                       th2, th2.params, val2, val2.params,
+                       h_p1, h_v1, h_p2, h_v2)
+    final_scan_carry, (aux1, aux2, aux_info) = jax.lax.scan(env_step, init_scan_carry, None, args.rollout_len)
+
+    (cat_probs1, obs_out1, lp1, lp2, v1, r1, a1, a2) = aux1
+    (cat_probs2, obs_out2, lp2b, lp1b, v2, r2, a2b, a1b) = aux2
+    avg_r1 = r1.mean()
+    avg_r2 = r2.mean()
+
+    rr_matches_amount = None
+    rb_matches_amount = None
+    br_matches_amount = None
+    bb_matches_amount = None
+
+    if args.env == 'coin':
+        (rr_matches, rb_matches, br_matches, bb_matches) = aux_info
+        rr_matches_amount = rr_matches.sum(axis=0).mean()
+        rb_matches_amount = rb_matches.sum(axis=0).mean()
+        br_matches_amount = br_matches.sum(axis=0).mean()
+        bb_matches_amount = bb_matches.sum(axis=0).mean()
+
+    # Evaluate vs fixed strats
+    score1rec = []
+    score2rec = []
+    for strat in ["alld", "allc", "tft"]:
+        key, subkey = jax.random.split(key)
+        sc1, _ = eval_vs_fixed_strategy(subkey, th1, val1, strat, self_agent=1)
+        score1rec.append(sc1[0])
+
+        key, subkey = jax.random.split(key)
+        sc2, _ = eval_vs_fixed_strategy(subkey, th2, val2, strat, self_agent=2)
+        score2rec.append(sc2[1])
+
+    return avg_r1, avg_r2, rr_matches_amount, rb_matches_amount, br_matches_amount, bb_matches_amount, jnp.stack(score1rec), jnp.stack(score2rec)
 
 
 def play(key, init_trainstate_th1, init_trainstate_val1, init_trainstate_th2, init_trainstate_val2, use_opp_model=False):
