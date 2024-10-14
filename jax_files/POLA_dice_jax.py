@@ -1,6 +1,7 @@
 import numpy as np
 import argparse
 import datetime
+import itertools
 
 import jax
 from jax import jit
@@ -1036,44 +1037,6 @@ def eval_vs_fixed_strategy(key, train_th, train_val, strat="alld", self_agent=1)
     return (s1.mean(), s2.mean()), None
 
 
-def inspect_ipd(trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2):
-    assert args.env == 'ipd'
-    unused_keys = jax.random.split(jax.random.PRNGKey(0), args.batch_size)
-    state, obsv = vec_env_reset(unused_keys)
-
-    init_state = env.init_state
-
-    for i in range(2):
-        for j in range(2):
-            state1 = env.states[i, j]
-            for ii in range(2):
-                for jj in range(2):
-                    state2 = env.states[ii, jj]
-
-                    state_history = [init_state, state1, state2]
-                    print(state_history)
-
-                    pol_probs1 = get_policies_for_states_onebatch(jax.random.PRNGKey(0),
-                                                         trainstate_th1,
-                                                         trainstate_th1.params,
-                                                         trainstate_val1,
-                                                         trainstate_val1.params,
-                                                         state_history)
-                    pol_probs2 = get_policies_for_states_onebatch(jax.random.PRNGKey(0),
-                                                         trainstate_th2,
-                                                         trainstate_th2.params,
-                                                         trainstate_val2,
-                                                         trainstate_val2.params,
-                                                         state_history)
-                    print(pol_probs1)
-                    print(pol_probs2)
-
-    # Build state history artificially for all combs, and pass those into the pol_probs.
-
-
-
-
-
 ###############################################################################
 #                   Opponent Modeling: Supervised Approach                    #
 ###############################################################################
@@ -1399,6 +1362,46 @@ def eval_progress(subkey, th1, val1, th2, val2):
         score2rec.append(sc2[1])
 
     return avg_r1, avg_r2, rr_matches_amount, rb_matches_amount, br_matches_amount, bb_matches_amount, jnp.stack(score1rec), jnp.stack(score2rec)
+
+
+def inspect_ipd(th1, val1, th2, val2):
+    """
+    Inspect policies of TWO agents in IPD env across all possible state histories up to two steps.
+    """
+
+    # Initialize PRNG key and reset the vectorized environment
+    key = jax.random.PRNGKey(0)
+    unused_keys = jax.random.split(key, args.batch_size)
+    state, obsv = vec_env_reset(unused_keys)
+    init_state = env.init_state
+
+    # Define agents for streamlined processing
+    agents = [
+        ('Agent 1', th1, val1),
+        ('Agent 2', th2, val2)
+    ]
+
+    # Generate all possible combinations of states for both agents (2 actions each)
+    state_combinations = list(itertools.product(range(2), repeat=2))  # [(0,0), (0,1), (1,0), (1,1)]
+    all_state_histories = itertools.product(state_combinations, repeat=2)  # 16 combinations
+
+    for (i, j), (ii, jj) in all_state_histories:
+        state1 = env.states[i, j]
+        state2 = env.states[ii, jj]
+        state_history = [init_state, state1, state2]
+
+        print(f"\nState History: {state_history}")
+
+        for agent_name, th, val in agents:
+            pol_probs = get_policies_for_states_onebatch(
+                key=jax.random.PRNGKey(0),
+                th_p_trainstate=th,
+                th_p_params=th.params,
+                th_v_trainstate=val,
+                th_v_params=val.params,
+                obs_hist=state_history
+            )
+            print(f"{agent_name} Policy Probabilities: {pol_probs}")
 
 
 def play(key, init_trainstate_th1, init_trainstate_val1, init_trainstate_th2, init_trainstate_val2, use_opp_model=False):
