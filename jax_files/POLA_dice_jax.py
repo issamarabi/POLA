@@ -1536,126 +1536,184 @@ def play(key, init_th1, init_val1, init_th2, init_val2, use_opp_model=False):
     return []  # or return any final metrics
 
 
+###############################################################################
+#                             Main Script Entry                                #
+###############################################################################
 
 
 if __name__ == "__main__":
+
     parser = argparse.ArgumentParser("POLA")
-    parser.add_argument("--inner_steps", type=int, default=1, help="inner loop steps for DiCE")
-    parser.add_argument("--outer_steps", type=int, default=1, help="outer loop steps for POLA")
-    parser.add_argument("--lr_out", type=float, default=0.005,
-                        help="outer loop learning rate: same learning rate across all policies for now")
-    parser.add_argument("--lr_in", type=float, default=0.03,
-                        help="inner loop learning rate (eta): this has no use in the naive learning case. Used for the gradient step done for the lookahead for other agents during LOLA (therefore, often scaled to be higher than the outer learning rate in non-proximal LOLA). Note that this has a different meaning for the Taylor approx vs. actual update versions. A value of eta=1 is perfectly reasonable for the Taylor approx version as this balances the scale of the gradient with the naive learning term (and will be multiplied by the outer learning rate after), whereas for the actual update version with neural net, 1 is way too big an inner learning rate. For prox, this is the learning rate on the inner prox loop so is not that important - you want big enough to be fast-ish, but small enough to converge.")
-    parser.add_argument("--lr_v", type=float, default=0.001,
-                        help="same learning rate across all policies for now. Should be around maybe 0.001 or less for neural nets to avoid instability")
-    parser.add_argument("--gamma", type=float, default=0.96, help="discount rate")
-    parser.add_argument("--n_update", type=int, default=5000, help="number of epochs to run")
-    parser.add_argument("--rollout_len", type=int, default=50, help="How long we want the time horizon of the game to be (number of steps before termination/number of iterations of the IPD)")
-    parser.add_argument("--batch_size", type=int, default=4000)
-    parser.add_argument("--seed", type=int, default=1, help="for seed")
-    parser.add_argument("--hidden_size", type=int, default=32)
-    parser.add_argument("--print_every", type=int, default=1, help="Print every x number of epochs")
-    parser.add_argument("--outer_beta", type=float, default=0.0, help="for outer kl penalty with POLA")
-    parser.add_argument("--inner_beta", type=float, default=0.0, help="for inner kl penalty with POLA")
-    parser.add_argument("--save_dir", type=str, default='.', help="Where to save checkpoints")
-    parser.add_argument("--checkpoint_every", type=int, default=50, help="Epochs between checkpoint save")
-    parser.add_argument("--load_dir", type=str, default=None, help="Directory for loading checkpoint")
-    parser.add_argument("--load_prefix", type=str, default=None, help="Prefix for loading checkpoint")
-    parser.add_argument("--diff_coin_reward", type=float, default=1.0, help="changes problem setting (the reward for picking up coin of different colour)")
-    parser.add_argument("--diff_coin_cost", type=float, default=-2.0, help="changes problem setting (the cost to the opponent when you pick up a coin of their colour)")
-    parser.add_argument("--same_coin_reward", type=float, default=1.0, help="changes problem setting (the reward for picking up coin of same colour)")
-    parser.add_argument("--grid_size", type=int, default=3, help="Grid size for Coin Game")
-    parser.add_argument("--optim", type=str, default="adam", help="Used only for the outer agent (in the out_lookahead)")
-    parser.add_argument("--no_baseline", action="store_true", help="Use NO Baseline (critic) for variance reduction. Default is baseline using Loaded DiCE with GAE")
-    parser.add_argument("--opp_model", action="store_true", help="Use Opponent Modeling")
-    parser.add_argument("--opp_model_steps_per_batch", type=int, default=1, help="How many steps to train opp model on each batch at the beginning of each POLA epoch")
-    parser.add_argument("--opp_model_data_batches", type=int, default=100, help="How many batches of data (right now from rollouts) to train opp model on")
+
+    # -------------------- General Hyperparameters --------------------
+    parser.add_argument("--inner_steps", type=int, default=1, help="Number of inner loop steps (K).")
+    parser.add_argument("--outer_steps", type=int, default=1, help="Number of outer loop steps (M).")
+    parser.add_argument("--lr_out", type=float, default=0.005, help="Outer loop learning rate.")
+    parser.add_argument("--lr_in", type=float, default=0.03, help="Inner loop learning rate.")
+    parser.add_argument("--lr_v", type=float, default=0.001, help="Learning rate for the value function.")
+    parser.add_argument("--gamma", type=float, default=0.96, help="Discount factor.")
+    parser.add_argument("--gae_lambda", type=float, default=1.0, help="GAE lambda parameter.")
+    parser.add_argument("--n_update", type=int, default=5000, help="Number of main training epochs.")
+    parser.add_argument("--rollout_len", type=int, default=50, help="Time horizon of game (episode length).")
+    parser.add_argument("--batch_size", type=int, default=4000, help="Number of parallel environments.")
+    parser.add_argument("--seed", type=int, default=1, help="Random seed.")
+    parser.add_argument("--hidden_size", type=int, default=32, help="Number of hidden units in RNN.")
+    parser.add_argument("--layers_before_gru", type=int, default=2,
+                        choices=[0, 1, 2],
+                        help="Number of Dense layers before the GRU cell.")
+    parser.add_argument("--optim", type=str, default="adam",
+                        help="Optimizer for the outer loop (adam or sgd).")
+
+    # -------------------- Environment / Task --------------------
+    parser.add_argument("--env", type=str, default="coin", choices=["ipd", "coin"],
+                        help="Which environment to run: 'ipd' or 'coin'.")
+    parser.add_argument("--grid_size", type=int, default=3,
+                        help="Grid size for Coin Game (only 3 is implemented as of 2/2/2025).")
+    parser.add_argument("--contrib_factor", type=float, default=1.33,
+                        help="Contribution factor in IPD-like environment.")
+    parser.add_argument("--init_state_coop", action="store_true",
+                        help="If True, IPD starts at (C,C) instead of a special init state.")
+    parser.add_argument("--diff_coin_reward", type=float, default=1.0,
+                        help="Reward for picking up opponent's coin in Coin Game.")
+    parser.add_argument("--diff_coin_cost", type=float, default=-2.0,
+                        help="Cost inflicted on opponent when you pick up their coin.")
+    parser.add_argument("--same_coin_reward", type=float, default=1.0,
+                        help="Reward for picking up your own coin.")
+    parser.add_argument("--split_coins", action="store_true",
+                        help="If both agents collect simultaneously, split the reward. (not always implemented).")
+
+    # -------------------- Proximal & Baseline Settings --------------------
+    parser.add_argument("--outer_beta", type=float, default=0.0, help="Outer KL penalty coefficient (beta_out).")
+    parser.add_argument("--inner_beta", type=float, default=0.0, help="Inner KL penalty coefficient (beta_in).")
+    parser.add_argument("--rev_kl", action="store_true",
+                        help="If True, use reverse KL. Otherwise, forward KL.")
+    parser.add_argument("--no_baseline", action="store_true",
+                        help="Disable baseline/critic (GAE). Then uses basic DiCE.")
+    parser.add_argument("--zero_vals", action="store_true",
+                        help="For debugging: forcibly set all baseline values to zero in Loaded DiCE.")
+    parser.add_argument("--val_update_after_loop", action="store_true",
+                        help="Update value functions only after the outer POLA loop finishes")
+
+    # -------------------- Opponent Modeling Settings --------------------
+    parser.add_argument("--opp_model", action="store_true",
+                        help="Enable opponent modeling. Agents do not directly see each other's parameters.")
+    parser.add_argument("--opp_model_steps_per_batch", type=int, default=1,
+                        help="Number of supervised gradient steps on each mini-batch for opponent modeling.")
+    parser.add_argument("--opp_model_data_batches", type=int, default=100,
+                        help="Number of environment rollout batches for data collection in OM step to train opp model.")
     parser.add_argument("--om_lr_p", type=float, default=0.005,
-                        help="learning rate for opponent modeling (imitation/supervised learning) for policy")
+                        help="Learning rate for opponent model policy (BC).")
     parser.add_argument("--om_lr_v", type=float, default=0.001,
-                        help="learning rate for opponent modeling (imitation/supervised learning) for value")
-    parser.add_argument("--env", type=str, default="coin",
-                        choices=["ipd", "coin"])
-    parser.add_argument("--hist_one", action="store_true", help="Use one step history (no gru or rnn, just one step history)")
-    parser.add_argument("--print_info_each_outer_step", action="store_true", help="For debugging/curiosity sake")
-    parser.add_argument("--init_state_coop", action="store_true", help="For IPD only: have the first state be CC instead of a separate start state")
-    parser.add_argument("--split_coins", action="store_true", help="If true, then when both agents step on same coin, each gets 50% of the reward as if they were the only agent collecting that coin. Only tested with OGCoin so far")
-    parser.add_argument("--zero_vals", action="store_true", help="For testing/debug. Can also serve as another way to do no_baseline. Set all values to be 0 in Loaded Dice Calculation")
-    parser.add_argument("--gae_lambda", type=float, default=1,
-                        help="lambda for GAE (1 = monte carlo style, 0 = TD style)")
-    parser.add_argument("--val_update_after_loop", action="store_true", help="Update values only after outer POLA loop finishes, not during the POLA loop")
-    parser.add_argument("--std", type=float, default=0.1, help="standard deviation for initialization of policy/value parameters")
-    parser.add_argument("--inspect_ipd", action="store_true", help="Detailed (2 steps + start state) policy information in the IPD with full history")
-    parser.add_argument("--layers_before_gru", type=int, default=2, choices=[0, 1, 2], help="Number of linear layers (with ReLU activation) before GRU, supported up to 2 for now")
-    parser.add_argument("--contrib_factor", type=float, default=1.33, help="contribution factor to vary difficulty of IPD")
-    parser.add_argument("--rev_kl", action="store_true", help="If true, then use KL(curr, target)")
+                        help="Learning rate for opponent model value function (BC).")
+
+    # -------------------- Logging / Saving / Debug --------------------
+    parser.add_argument("--print_every", type=int, default=1,
+                        help="Print logs every 'print_every' epochs.")
+    parser.add_argument("--checkpoint_every", type=int, default=50,
+                        help="Save a checkpoint every 'checkpoint_every' epochs.")
+    parser.add_argument("--save_dir", type=str, default='.',
+                        help="Directory to save checkpoints.")
+    parser.add_argument("--load_dir", type=str, default=None,
+                        help="Directory from which to load checkpoints.")
+    parser.add_argument("--load_prefix", type=str, default=None,
+                        help="Checkpoint prefix for loading.")
+    parser.add_argument("--inspect_ipd", action="store_true",
+                        help="If set, prints detailed info in IPD states for debugging.")
+
+    # -------------------- Additional Settings --------------------
+    parser.add_argument("--hist_one", action="store_true",
+                        help="Use one step history (no GRU or RNN, just one step history)")
+    parser.add_argument("--print_info_each_outer_step", action="store_true",
+                        help="Print information at each outer step for debugging purposes")
+    parser.add_argument("--std", type=float, default=0.1,
+                        help="Standard deviation for initialization of policy/value parameters")
 
     args = parser.parse_args()
 
+    # Determine if we use a baseline (value function)
+    use_baseline = not args.no_baseline
+
+    # Set random seed
     np.random.seed(args.seed)
+    key = jax.random.PRNGKey(args.seed)
 
-
-
+    # Setup the environment
     if args.env == 'coin':
         assert args.grid_size == 3  # rest not implemented yet
-        input_size = args.grid_size ** 2 * 4
-        action_size = 4
-        env = CoinGame()
+
+        env = CoinGame(
+            grid_size=args.grid_size,
+            # same_coin_reward=args.same_coin_reward,
+            # diff_coin_reward=args.diff_coin_reward,
+            # diff_coin_cost=args.diff_coin_cost,
+            # split_coins=args.split_coins
+        )
+        input_size = args.grid_size ** 2 * 4  # for a 3x3 grid with 4 channels, e.g.
+        action_size = 4  # up / down / left / right
+        
     elif args.env == 'ipd':
-        input_size = 6 # 3 * n_agents
-        action_size = 2
         env = IPD(init_state_coop=args.init_state_coop, contrib_factor=args.contrib_factor)
+        input_size = 6  # 3 * n_agents
+        action_size = 2  # cooperate or defect
+        
     else:
-        raise NotImplementedError("unknown env")
+        raise NotImplementedError("Unsupported environment type.")
+
+    # Vectorize reset and step
     vec_env_reset = jax.vmap(env.reset)
     vec_env_step = jax.vmap(env.step)
 
+    # Create initial trainstates (policies & values) for both agents
+    trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2 = get_init_trainstates(
+        key, action_size, input_size
+    )
 
+    # Optionally load from a checkpoint
+    if args.load_dir is not None and args.load_prefix is not None:
+        # Extract epoch number from load_prefix
+        try:
+            epoch_num = int(args.load_prefix.split("epoch")[-1])
+        except (IndexError, ValueError):
+            raise ValueError("Failed to extract epoch number from load_prefix. Ensure it contains 'epoch<NUMBER>'.")
 
-    key = jax.random.PRNGKey(args.seed)
-
-
-    trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2 = get_init_trainstates(key, action_size, input_size)
-
-
-    if args.load_dir is not None:
-        epoch_num = int(args.load_prefix.split("epoch")[-1])
+        # Apply the same adjustment as the original code
         if epoch_num % 10 == 0:
-            epoch_num += 1  # Kind of an ugly temporary fix to allow for the updated checkpointing system which now has
-            # record of rewards/eval vs fixed strat before the first training - important for IPD plots. Should really be applied to
-            # all checkpoints with the new updated code I have, but the coin checkpoints above are from old code
+            epoch_num += 1  # Temporary fix as per original code comments
 
         score_record = [jnp.zeros((2,))] * epoch_num
-        vs_fixed_strats_score_record = [[jnp.zeros((3,))] * epoch_num,
-                                        [jnp.zeros((3,))] * epoch_num]
+        vs_fixed_strats_score_record = [
+            [jnp.zeros((3,))] * epoch_num, 
+            [jnp.zeros((3,))] * epoch_num
+        ]
+
+        # Initialize coins_collected_info based on environment
         if args.env == 'coin':
-            same_colour_coins_record = [jnp.zeros((1,))] * epoch_num
-            diff_colour_coins_record = [jnp.zeros((1,))] * epoch_num
+            coins_collected_info = (
+                [jnp.zeros((1,))] * epoch_num,
+                [jnp.zeros((1,))] * epoch_num
+            )
         else:
-            same_colour_coins_record = []
-            diff_colour_coins_record = []
-        coins_collected_info = (
-            same_colour_coins_record, diff_colour_coins_record)
+            coins_collected_info = ([], [])
 
-        assert args.load_prefix is not None
-        restored_tuple = checkpoints.restore_checkpoint(ckpt_dir=args.load_dir,
-                                                        target=(trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2,
-                                                                coins_collected_info,
-                                                                score_record,
-                                                                vs_fixed_strats_score_record),
-                                                        prefix=args.load_prefix)
+        # Restore checkpoint
+        restored_tuple = checkpoints.restore_checkpoint(
+            ckpt_dir=args.load_dir,
+            target=(
+                trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2,
+                coins_collected_info,
+                score_record,
+                vs_fixed_strats_score_record
+            ),
+            prefix=args.load_prefix
+        )
 
-        trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, coins_collected_info, score_record, vs_fixed_strats_score_record = restored_tuple
-
-
-    use_baseline = True
-    if args.no_baseline:
-        use_baseline = False
-
-    assert args.inner_steps >= 1
-    # Use 0 lr if you want no inner steps... TODO allow for 0 inner steps? Might save computation for naive learning instead of 0 lr
-    assert args.outer_steps >= 1
+        # Unpack the restored data
+        trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, \
+        coins_collected_info, score_record, vs_fixed_strats_score_record = restored_tuple
 
 
-    joint_scores = play(key, trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2,
-                        args.opp_model)
+    # Finally, run the main training loop
+    play(key,
+         trainstate_th1, trainstate_val1,
+         trainstate_th2, trainstate_val2,
+         use_opp_model=args.opp_model)
