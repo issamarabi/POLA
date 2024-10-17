@@ -6,35 +6,27 @@ from typing import NamedTuple, Tuple
 MOVES = jax.device_put(
     jnp.array(
         [
-            [0, 1],  # right
+            [0, 1],   # right
             [0, -1],  # left
-            [1, 0],  # down
+            [1, 0],   # down
             [-1, 0],  # up
         ]
     )
 )
 
-DEFAULT_GRID_SIZE = 3
-
-# Constants to represent the two types of coins: red and blue.
-COIN_RED = 0
-COIN_BLUE = 1
-
 class CoinGameState(NamedTuple):
     """
-    Represents the state of the CoinGame.
+    Represents the state of the N-agent CoinGame.
 
     Attributes:
-    - red_pos: Position of the red player.
-    - blue_pos: Position of the blue player.
-    - coin_pos: Position of the coin.
-    - is_red_coin: Flag indicating if the coin is red.
+    - agent_positions: jnp.ndarray of shape [n_agents, 2]
+    - coin_pos: 2D position of the coin, shape [2]
+    - coin_color: scalar integer in [0, n_agents), meaning the coin "belongs" to that agent
     - step_count: Number of steps taken in the current episode.
     """
-    red_pos: jnp.ndarray
-    blue_pos: jnp.ndarray
+    agent_positions: jnp.ndarray
     coin_pos: jnp.ndarray
-    is_red_coin: jnp.ndarray
+    coin_color: jnp.ndarray
     step_count: jnp.ndarray
 
 class CoinGame:
