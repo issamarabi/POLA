@@ -29,14 +29,20 @@ class CoinGameState(NamedTuple):
     coin_color: jnp.ndarray
     step_count: jnp.ndarray
 
+
 class CoinGame:
     """
-    Defines the CoinGame environment.
+    Defines an N-agent CoinGame environment on a grid of size (grid_size x grid_size).
 
-    Attributes:
-    - grid_size: Size of the grid on which the game is played.
     """
-    def __init__(self, grid_size=DEFAULT_GRID_SIZE):
+
+    def __init__(self, n_agents=2, grid_size=3):
+        """
+        Args:
+        - n_agents: number of agents (>= 2)
+        - grid_size: dimension of the square grid
+        """
+        self.n_agents = n_agents
         self.grid_size = grid_size
 
     def generate_coins(self, random_key: jnp.ndarray, red_pos_flat: int, blue_pos_flat: int) -> jnp.ndarray:
