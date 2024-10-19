@@ -45,25 +45,33 @@ class CoinGame:
         self.n_agents = n_agents
         self.grid_size = grid_size
 
-    def generate_coins(self, random_key: jnp.ndarray, red_pos_flat: int, blue_pos_flat: int) -> jnp.ndarray:
+    def _generate_new_coin_pos(self, key: jnp.ndarray, agent_positions_flat: jnp.ndarray) -> jnp.ndarray:
         """
-        Generate a random position for the coin such that it doesn't overlap with the players' positions.
-
+        Samples a random position for the coin that does not overlap with any agent's position.
         Args:
-        - random_key: Random seed.
-        - red_pos_flat: Flattened position of the red player.
-        - blue_pos_flat: Flattened position of the blue player.
+        - key: PRNGKey
+        - agent_positions_flat: shape [n_agents], each is the flattened index row*grid_size + col
 
-        Returns:
-        - coin_pos: 2D position of the coin.
+        Returns: shape [2], row and col
         """
-        random_key, key_for_max_val, key_for_coin_pos = jax.random.split(random_key, 3)
-        max_val_for_coin = (self.grid_size ** 2) - 2 + (red_pos_flat == blue_pos_flat)
-        coin_pos_flat = jax.random.randint(key_for_coin_pos, shape=(1,), minval=0, maxval=max_val_for_coin)
-        coin_pos_flat += (coin_pos_flat >= jnp.min(jnp.array([red_pos_flat, blue_pos_flat])))
-        coin_pos_flat += jnp.logical_and(coin_pos_flat >= jnp.max(jnp.array([red_pos_flat, blue_pos_flat])), 
-                                         red_pos_flat != blue_pos_flat)
-        coin_pos = jnp.stack((coin_pos_flat // self.grid_size, coin_pos_flat % self.grid_size)).squeeze(-1)
+        # We exclude the agent positions from the possible coin positions
+        # Maximum of (grid_size^2 - n_agents) possible positions.
+        # We'll do a simple approach: sample among all positions, then re-sample if it’s an agent’s position
+
+        # Sample an integer in [0, grid_area - n_agents] then shift it up by #excluded slots
+        coin_key, key = jax.random.split(key, 2)
+        max_val_for_coin = (self.grid_size ** 2) - jnp.unique(agent_positions_flat).size
+
+        coin_pos_flat = jax.random.randint(coin_key, shape=(1,), minval=0, maxval=max_val_for_coin)
+        # Now offset if it is in an excluded region
+        def shift_if_needed_scan(pos_flat, agent_pos):
+            pos_flat = pos_flat + (pos_flat >= agent_pos)
+            return pos_flat, None
+
+        coin_pos_flat, _ = jax.lax.scan(shift_if_needed_scan, coin_pos_flat, jnp.sort(jnp.unique(agent_positions_flat)))
+        coin_pos = jnp.stack(
+            (coin_pos_flat // self.grid_size, coin_pos_flat % self.grid_size)
+        ).squeeze(-1)
         return coin_pos
 
     def reset(self, random_key: jnp.ndarray) -> Tuple[CoinGameState, jnp.ndarray]:
