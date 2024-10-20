@@ -74,30 +74,45 @@ class CoinGame:
         ).squeeze(-1)
         return coin_pos
 
-    def reset(self, random_key: jnp.ndarray) -> Tuple[CoinGameState, jnp.ndarray]:
+    def reset(self, key: jnp.ndarray) -> Tuple[CoinGameState, jnp.ndarray]:
         """
-        Reset the game to its initial state.
-
-        Args:
-        - random_key: Random seed.
+        Resets the environment:
+          - Places each of the n_agents in a random distinct cell
+          - Places the coin in a random cell distinct from agent positions
+          - Randomly picks a coin_color in [0, n_agents)
 
         Returns:
-        - state: Initial state of the game.
-        - obs: Initial observation.
+          - state: CoinGameState
+          - obs: jnp.ndarray  Flattened observation
         """
-        random_key, key_for_red, key_for_blue, key_for_coin = jax.random.split(random_key, 4)
-        red_pos_flat = jax.random.randint(key_for_red, shape=(1,), minval=0, maxval=self.grid_size ** 2)
-        red_pos = jnp.stack((red_pos_flat // self.grid_size, red_pos_flat % self.grid_size)).squeeze(-1)
-        blue_pos_flat = jax.random.randint(key_for_blue, shape=(1,), minval=0, maxval=self.grid_size ** 2)
-        blue_pos = jnp.stack((blue_pos_flat // self.grid_size, blue_pos_flat % self.grid_size)).squeeze(-1)
-        coin_pos = self.generate_coins(key_for_coin, red_pos_flat[0], blue_pos_flat[0])
-        step_count = jnp.zeros(1)
-        is_red_coin = jax.random.randint(key_for_coin, shape=(1,), minval=COIN_RED, maxval=COIN_BLUE+1)
-        state = CoinGameState(red_pos, blue_pos, coin_pos, is_red_coin, step_count)
+        # Randomly place each agent
+        # For simplicity, let each agent's position be drawn i.i.d. from [0, grid_size^2)
+        # If we want to require strictly distinct positions, we can add logic similar to the coin logic.
+        subkeys = jax.random.split(key, 1 + self.n_agents)
+        key_agent_positions = subkeys[0]
+        agent_pos_flat = []
+        for i in range(self.n_agents):
+            pos_flat_i = jax.random.randint(
+                subkeys[i], shape=(1,), minval=0, maxval=self.grid_size**2
+            )
+            agent_pos_flat.append(pos_flat_i[0])
+        agent_pos_flat = jnp.array(agent_pos_flat)  # shape [n_agents]
+        agent_positions = jnp.stack(
+            (agent_pos_flat // self.grid_size, agent_pos_flat % self.grid_size), axis=-1
+        )  # shape [n_agents, 2]
+
+        # Place the coin
+        key_coin, key_color = jax.random.split(key_agent_positions, 2)
+        coin_pos = self._generate_new_coin_pos(key_coin, agent_pos_flat)
+
+        # coin_color in [0..n_agents)
+        coin_color = jax.random.randint(key_color, shape=(), minval=0, maxval=self.n_agents)
+
+        step_count = jnp.zeros((), dtype=jnp.int32)
+
+        state = CoinGameState(agent_positions, coin_pos, coin_color, step_count)
         obs = self.state_to_obs(state)
         return state, obs
-
-
 
     def state_to_obs(self, state: CoinGameState) -> jnp.ndarray:
         """
