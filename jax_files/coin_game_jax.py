@@ -116,21 +116,34 @@ class CoinGame:
 
     def state_to_obs(self, state: CoinGameState) -> jnp.ndarray:
         """
-        Convert the game state to an observation.
+        Builds a channels x grid_size x grid_size representation, then flattens it.
+        We use the first n_agents channels to mark agent positions, then n_agents channels
+        to mark the coin color at the coin position.
 
-        Args:
-        - state: Current state of the game.
-
-        Returns:
-        - obs: Observation representation of the state.
+        => final shape = (2*n_agents, grid_size, grid_size), flattened to size 2*n_agents*(grid_size^2).
         """
-        is_red_coin = state.is_red_coin[0]
-        obs = jnp.zeros((4, 3, 3))
-        obs = obs.at[0, state.red_pos[0], state.red_pos[1]].set(1.0)  # Mark red player's position
-        obs = obs.at[1, state.blue_pos[0], state.blue_pos[1]].set(1.0)  # Mark blue player's position
-        obs = obs.at[2, state.coin_pos[0], state.coin_pos[1]].set(is_red_coin)  # Mark red coin's position
-        obs = obs.at[3, state.coin_pos[0], state.coin_pos[1]].set(1.0 - is_red_coin)  # Mark blue coin's position
-        obs = obs.reshape(36)
+        n_agents = self.n_agents
+        grid_size = self.grid_size
+
+        # Initialize channels
+        #   channel i   => agent i positions
+        #   channel n_agents + j => j==coin_color means that channel is 1 at coin pos
+        obs = jnp.zeros((2 * n_agents, grid_size, grid_size))
+
+        # Fill in agent positions
+        def mark_agent(obs_acc, agent_idx):
+            row, col = state.agent_positions[agent_idx]
+            return obs_acc.at[agent_idx, row, col].set(1.0)
+
+        obs = jax.lax.fori_loop(0, n_agents, lambda i, o: mark_agent(o, i), obs)
+
+        # Fill in coin position
+        coin_r, coin_c = state.coin_pos
+        coin_col = state.coin_color  # integer in [0..n_agents)
+        obs = obs.at[n_agents + coin_col, coin_r, coin_c].set(1.0)
+
+        # Flatten
+        obs = obs.reshape(-1)
         return obs
 
     def step(self, state: CoinGameState, action_0: int, action_1: int, subkey: jnp.ndarray) -> Tuple[jnp.ndarray, list]:
