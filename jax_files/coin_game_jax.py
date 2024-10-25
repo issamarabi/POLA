@@ -247,48 +247,69 @@ class CoinGame:
         return new_state, obs, rewards
 
 
-    def get_moves_shortest_path_to_coin(self, state, red_agent_perspective=True):
+    def get_moves_towards_coin(self, state: CoinGameState) -> jnp.ndarray:
         """
-        Calculate the move towards the shortest path to the coin in a grid environment.
+        Returns a [n_agents] array of actions in {0,1,2,3}, each action
+        makes the corresponding agent move closer (mod wrap-around) to the coin.
 
-        This function computes the shortest path for an agent (either red or blue) to a coin
-        located on a grid. It evaluates the horizontal and vertical distances from the agent to the coin
-        and selects the move (action) that minimally reduces this distance.
-
-        Parameters:
-        - state (object): The current state of the environment, which includes the positions
-                          of the agent and the coin.
-        - red_agent_perspective (bool): A flag indicating whether the calculation is from the
-                                        perspective of the red agent. If False, the calculation
-                                        is done for the blue agent.
-
-        Returns:
-        - actions (jax.numpy.ndarray): An array of integers representing the action(s) leading
-                                       towards the shortest path to the coin. The actions are encoded as:
-                                       0 - Move right, 1 - Move left, 2 - Move down, 3 - Move up.
-
-        Note:
-        - The grid size of the environment is taken into account, and the function assumes a toroidal
-          (wrap-around) topology.
-        - The calculation prioritizes horizontal movement (left/right) over vertical movement (up/down).
+        This generalizes the old 'get_moves_shortest_path_to_coin(...)'
+        but returns one move for *every* agent i in [0..n_agents-1].
         """
-        # Choose the agent's position based on perspective
-        agent_pos = state.red_pos if red_agent_perspective else state.blue_pos
+        grid_size = self.grid_size
+        # Unpack
+        agent_positions = state.agent_positions  # shape [n_agents, 2]
+        coin_r, coin_c = state.coin_pos          # shape []
 
-        # Calculate horizontal and vertical distances to the coin, modular with the grid size
-        horiz_dist_right = (state.coin_pos[:, 1] - agent_pos[:, 1]) % self.grid_size
-        horiz_dist_left = (agent_pos[:, 1] - state.coin_pos[:, 1]) % self.grid_size
-        vert_dist_down = (state.coin_pos[:, 0] - agent_pos[:, 0]) % self.grid_size
-        vert_dist_up = (agent_pos[:, 0] - state.coin_pos[:, 0]) % self.grid_size
+        # Each agent i: position (ar_i, ac_i)
+        ar = agent_positions[:, 0]
+        ac = agent_positions[:, 1]
 
-        # Initialize actions with a default value (e.g., 0)
-        actions = jnp.zeros_like(agent_pos[:, 0])
+        # Mod distances for horizontal axis (c)
+        # "horiz_dist_right" = how far agent i must go right to reach coin_c
+        horiz_dist_right = (coin_c - ac) % grid_size
+        horiz_dist_left  = (ac - coin_c) % grid_size
 
-        # Determine the action (move) based on the shortest path to the coin
-        actions = jnp.where(horiz_dist_right < horiz_dist_left, 0, actions)  # Move right
-        actions = jnp.where(horiz_dist_left < horiz_dist_right, 1, actions)  # Move left
-        actions = jnp.where(vert_dist_down < vert_dist_up, 2, actions)      # Move down
-        actions = jnp.where(vert_dist_up < vert_dist_down, 3, actions)      # Move up
+        # Mod distances for vertical axis (r)
+        vert_dist_down = (coin_r - ar) % grid_size
+        vert_dist_up   = (ar - coin_r) % grid_size
+
+        # We pick the smallest direction among {left, right, up, down}
+        # Priority order could be changed if you want tie-break differently.
+        # For each agent i, we will produce an action in {0,1,2,3}
+        # We'll do it with a direct jnp.where logic or by comparing distances.
+
+        # Start by defaulting to 0=right
+        actions = jnp.zeros((self.n_agents,), dtype=jnp.int32)
+
+        # If left is strictly smaller than right/down/up => set action=1
+        actions = jnp.where(
+            (horiz_dist_left < horiz_dist_right) & 
+            (horiz_dist_left < vert_dist_down)  &
+            (horiz_dist_left < vert_dist_up),
+            1,  # left
+            actions
+        )
+        # If down is strictly smaller than right/up => set action=2
+        # but note we must also compare to left in the correct order if you want a single winner
+        actions = jnp.where(
+            (vert_dist_down < horiz_dist_right) &
+            (vert_dist_down < vert_dist_up)     &
+            (vert_dist_down < horiz_dist_left),
+            2,  # down
+            actions
+        )
+        # If up is strictly smaller than right => set action=3
+        # likewise compare to left/down
+        actions = jnp.where(
+            (vert_dist_up < horiz_dist_right) &
+            (vert_dist_up < horiz_dist_down)  &
+            (vert_dist_up < horiz_dist_left),
+            3,  # up
+            actions
+        )
+
+        # If none of the above conditions are true, it remains 0 (right).
+        # This is just one tie-break pattern.
 
         return actions
 
