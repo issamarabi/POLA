@@ -313,23 +313,21 @@ class CoinGame:
 
         return actions
 
-
-    def get_moves_away_from_coin(self, moves_towards_coin: jnp.ndarray) -> jnp.ndarray:
-         """
-         Get the move that takes the agent away from the coin.
-         Args:
-         - moves_towards_coin: The move that brings the agent closer to the coin.
-         Returns:
-         - opposite_moves: The move that takes the agent away from the coin.
-         """
-         opposite_moves = jnp.zeros_like(moves_towards_coin)
-         opposite_moves = jnp.where(moves_towards_coin == 0, 1, opposite_moves)
-         opposite_moves = jnp.where(moves_towards_coin == 1, 0, opposite_moves)
-         opposite_moves = jnp.where(moves_towards_coin == 2, 3, opposite_moves)
-         opposite_moves = jnp.where(moves_towards_coin == 3, 2, opposite_moves)
-
-         return opposite_moves
-
+    def get_moves_away_from_coin(self, moves_toward: jnp.ndarray) -> jnp.ndarray:
+        """
+        Given a [n_agents] array of moves in {0,1,2,3} that would take each agent
+        *toward* the coin, returns a [n_agents] array of moves that take the agents
+        *away* from the coin. The mapping is:
+           0->1, 1->0, 2->3, 3->2
+        Because 0=right vs. 1=left, 2=down vs. 3=up.
+        """
+        # moves_toward, shape [n_agents], each in {0,1,2,3}
+        moves_away = jnp.zeros_like(moves_toward)
+        moves_away = jnp.where(moves_toward == 0, 1, moves_away)  # right->left
+        moves_away = jnp.where(moves_toward == 1, 0, moves_away)  # left->right
+        moves_away = jnp.where(moves_toward == 2, 3, moves_away)  # down->up
+        moves_away = jnp.where(moves_toward == 3, 2, moves_away)  # up->down
+        return moves_away
 
     def get_coop_action(self, state, red_agent_perspective=True) -> jnp.ndarray:
         """
