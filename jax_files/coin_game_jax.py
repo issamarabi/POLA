@@ -329,26 +329,23 @@ class CoinGame:
         moves_away = jnp.where(moves_toward == 3, 2, moves_away)  # up->down
         return moves_away
 
-    def get_coop_action(self, state, red_agent_perspective=True) -> jnp.ndarray:
+    def get_coop_actions(self, state: CoinGameState) -> jnp.ndarray:
         """
-        Get the cooperative action for the agent.
-
-        Args:
-        - state: Current state of the game.
-        - red_agent_perspective: If True, consider the red agent's perspective, otherwise consider the blue agent's.
-
-        Returns:
-        - coop_moves: The cooperative move for the agent.
+        Returns a [n_agents] array of "cooperative" actions:
+          - The coin's owner (coin_color) moves TOWARD the coin.
+          - Every other agent moves AWAY from the coin.
         """
-        moves_towards_coin = self.get_moves_shortest_path_to_coin(state, red_agent_perspective=red_agent_perspective)
-        moves_away_from_coin = self.get_moves_away_from_coin(moves_towards_coin)
+        moves_toward = self.get_moves_towards_coin(state)  # shape [n_agents]
+        moves_away   = self.get_moves_away_from_coin(moves_toward)
 
-        is_my_coin = state.is_red_coin if red_agent_perspective else 1 - state.is_red_coin
-        is_my_coin = is_my_coin.squeeze(-1)
+        # For the agent i = coin_color, we pick moves_toward[i].
+        # For i != coin_color, pick moves_away[i].
+        agent_indices = jnp.arange(self.n_agents, dtype=jnp.int32)
+        coin_color = state.coin_color  # an integer in [0..n_agents)
 
-        # Determine the cooperative move based on the coin's color.
-        coop_moves = jnp.where(is_my_coin == 1, moves_towards_coin, -1)
-        coop_moves = jnp.where(is_my_coin == 0, moves_away_from_coin, coop_moves)
-
-        return coop_moves
-
+        cooperative_actions = jnp.where(
+            agent_indices == coin_color,
+            moves_toward,  # if i == coin_color
+            moves_away     # else
+        )
+        return cooperative_actions
