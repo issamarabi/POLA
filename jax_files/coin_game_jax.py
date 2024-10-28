@@ -48,30 +48,41 @@ class CoinGame:
     def _generate_new_coin_pos(self, key: jnp.ndarray, agent_positions_flat: jnp.ndarray) -> jnp.ndarray:
         """
         Samples a random position for the coin that does not overlap with any agent's position.
+
         Args:
-        - key: PRNGKey
-        - agent_positions_flat: shape [n_agents], each is the flattened index row*grid_size + col
+        - key:       PRNGKey (shape [2], uint32)
+        - agent_positions_flat: shape [n_agents], each is flattened index row*grid_size + col in [0, grid_size^2)
 
         Returns: shape [2], row and col
         """
-        # We exclude the agent positions from the possible coin positions
-        # Maximum of (grid_size^2 - n_agents) possible positions.
-        # We'll do a simple approach: sample among all positions, then re-sample if it’s an agent’s position
+        grid_area = self.grid_size * self.grid_size
 
-        # Sample an integer in [0, grid_area - n_agents] then shift it up by #excluded slots
-        coin_key, key = jax.random.split(key, 2)
-        max_val_for_coin = (self.grid_size ** 2) - jnp.unique(agent_positions_flat).size
+        # A small function to check if the chosen position overlaps any agent.
+        def is_occupied(pos_flat: int) -> bool:
+            return (pos_flat == agent_positions_flat).any()
 
-        coin_pos_flat = jax.random.randint(coin_key, shape=(1,), minval=0, maxval=max_val_for_coin)
-        # Now offset if it is in an excluded region
-        def shift_if_needed_scan(pos_flat, agent_pos):
-            pos_flat = pos_flat + (pos_flat >= agent_pos)
-            return pos_flat, None
+        # The loop's condition: keep sampling if the coin position is occupied.
+        def cond_fun(carry):
+            pos, _, _ = carry
+            return is_occupied(pos)
 
-        coin_pos_flat, _ = jax.lax.scan(shift_if_needed_scan, coin_pos_flat, jnp.sort(jnp.unique(agent_positions_flat)))
-        coin_pos = jnp.stack(
-            (coin_pos_flat // self.grid_size, coin_pos_flat % self.grid_size)
-        ).squeeze(-1)
+        # The loop body: re-sample a new position.
+        def body_fun(carry):
+            _, tries, loop_key = carry
+            loop_key, subkey = jax.random.split(loop_key)
+            new_pos = jax.random.randint(subkey, shape=(), minval=0, maxval=grid_area)
+            return (new_pos, tries + 1, loop_key)
+
+        # Initial state: sample once and check.
+        key, subkey = jax.random.split(key)
+        init_pos = jax.random.randint(subkey, shape=(), minval=0, maxval=grid_area)
+        init_state = (init_pos, jnp.array(0, dtype=jnp.int32), key)
+
+        # Run the while_loop until we find a free cell.
+        final_pos, _, _ = jax.lax.while_loop(cond_fun, body_fun, init_state)
+
+        # Convert flat index to (row, col).
+        coin_pos = jnp.array([final_pos // self.grid_size, final_pos % self.grid_size], dtype=jnp.int32)
         return coin_pos
 
     def reset(self, key: jnp.ndarray) -> Tuple[CoinGameState, jnp.ndarray]:
