@@ -313,7 +313,7 @@ class CoinGame:
         # likewise compare to left/down
         actions = jnp.where(
             (vert_dist_up < horiz_dist_right) &
-            (vert_dist_up < horiz_dist_down)  &
+            (vert_dist_up < vert_dist_down)  &
             (vert_dist_up < horiz_dist_left),
             3,  # up
             actions
