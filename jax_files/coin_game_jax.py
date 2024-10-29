@@ -263,64 +263,45 @@ class CoinGame:
         Returns a [n_agents] array of actions in {0,1,2,3}, each action
         makes the corresponding agent move closer (mod wrap-around) to the coin.
 
-        This generalizes the old 'get_moves_shortest_path_to_coin(...)'
-        but returns one move for *every* agent i in [0..n_agents-1].
+        The move selection logic for each agent is as follows:
+        1. Compute the minimal horizontal distance and determine the direction (left/right).
+        2. Compute the minimal vertical distance and determine the direction (up/down).
+        3. Compare the minimal distances:
+        - If min_horiz_dist > min_vert_dist, move horizontally.
+        - Else, move vertically.
+        - If distances are equal, prefer vertical movement.
         """
         grid_size = self.grid_size
-        # Unpack
+
+        # Unpack agent positions and coin position
         agent_positions = state.agent_positions  # shape [n_agents, 2]
-        coin_r, coin_c = state.coin_pos          # shape []
+        coin_r, coin_c = state.coin_pos          # shape [2,]
 
-        # Each agent i: position (ar_i, ac_i)
-        ar = agent_positions[:, 0]
-        ac = agent_positions[:, 1]
+        # Split agent positions into rows and columns
+        ar = agent_positions[:, 0]  # [n_agents]
+        ac = agent_positions[:, 1]  # [n_agents]
 
-        # Mod distances for horizontal axis (c)
-        # "horiz_dist_right" = how far agent i must go right to reach coin_c
+        # Compute horizontal distances
         horiz_dist_right = (coin_c - ac) % grid_size
         horiz_dist_left  = (ac - coin_c) % grid_size
+        min_horiz_dist = jnp.minimum(horiz_dist_right, horiz_dist_left)
 
-        # Mod distances for vertical axis (r)
+        # Determine horizontal direction: 0=right, 1=left
+        horiz_dir = jnp.where(horiz_dist_right < horiz_dist_left, 0, 1)
+
+        # Compute vertical distances
         vert_dist_down = (coin_r - ar) % grid_size
         vert_dist_up   = (ar - coin_r) % grid_size
+        min_vert_dist = jnp.minimum(vert_dist_down, vert_dist_up)
 
-        # We pick the smallest direction among {left, right, up, down}
-        # Priority order could be changed if you want tie-break differently.
-        # For each agent i, we will produce an action in {0,1,2,3}
-        # We'll do it with a direct jnp.where logic or by comparing distances.
+        # Determine vertical direction: 2=down, 3=up
+        vert_dir = jnp.where(vert_dist_down < vert_dist_up, 2, 3)
 
-        # Start by defaulting to 0=right
-        actions = jnp.zeros((self.n_agents,), dtype=jnp.int32)
+        # Compare minimal distances and choose direction
+        move_horiz = (min_horiz_dist > min_vert_dist)
 
-        # If left is strictly smaller than right/down/up => set action=1
-        actions = jnp.where(
-            (horiz_dist_left < horiz_dist_right) & 
-            (horiz_dist_left < vert_dist_down)  &
-            (horiz_dist_left < vert_dist_up),
-            1,  # left
-            actions
-        )
-        # If down is strictly smaller than right/up => set action=2
-        # but note we must also compare to left in the correct order if you want a single winner
-        actions = jnp.where(
-            (vert_dist_down < horiz_dist_right) &
-            (vert_dist_down < vert_dist_up)     &
-            (vert_dist_down < horiz_dist_left),
-            2,  # down
-            actions
-        )
-        # If up is strictly smaller than right => set action=3
-        # likewise compare to left/down
-        actions = jnp.where(
-            (vert_dist_up < horiz_dist_right) &
-            (vert_dist_up < vert_dist_down)  &
-            (vert_dist_up < horiz_dist_left),
-            3,  # up
-            actions
-        )
-
-        # If none of the above conditions are true, it remains 0 (right).
-        # This is just one tie-break pattern.
+        # Select actions based on comparison
+        actions = jnp.where(move_horiz, horiz_dir, vert_dir)
 
         return actions
 
