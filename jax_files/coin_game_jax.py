@@ -170,6 +170,7 @@ class CoinGame:
         - new_state: CoinGameState
         - obs: jnp.ndarray (flattened)
         - rewards: shape [n_agents]
+        - info: None
         """
         n_agents = self.n_agents
         grid_size = self.grid_size
@@ -255,7 +256,7 @@ class CoinGame:
         )
         # 5) Build obs
         obs = self.state_to_obs(new_state)
-        return new_state, obs, rewards
+        return new_state, obs, rewards, None
 
 
     def get_moves_towards_coin(self, state: CoinGameState) -> jnp.ndarray:
