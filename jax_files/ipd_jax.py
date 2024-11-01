@@ -56,12 +56,8 @@ class IPD:
     def reset(self, unused_key):
         """
         Reset the game to its initial state.
-        
-        Args:
-        - unused_key: Placeholder for a random seed (not used in this method).
-        
-        Returns:
-        - Tuple of initial states for both agents.
+
+        Only first element needed, but we keep this signature to avoid breaking existing code.
         """
         return self.initial_state, self.initial_state
 
