@@ -23,35 +23,41 @@ class IPD:
     If you set N=2, this reproduces the same payoff structure and learning
     dynamics of the original 2-agent IPD code, but in a more flexible form.
     """
-    
-    def __init__(self, start_with_cooperation=False, cooperation_factor=1.33):
+
+    def __init__(
+        self,
+        n_agents=2,
+        start_with_cooperation=False,
+        cooperation_factor=1.33
+    ):
         """
         Initialize the IPD environment.
-        
+
         Args:
-        - start_with_cooperation: If True, the initial state is set to cooperation for both agents.
-        - cooperation_factor: Factor determining the reward for cooperation relative to defection.
+            n_agents: Number of agents in the game.
+            start_with_cooperation: Whether to start each agent's one-hot as [0,1,0] (cooperate)
+                                    instead of [0,0,1] (start).
+            cooperation_factor: Factor determining the reward for cooperation relative to defection.
         """
-        reward_coop_coop = cooperation_factor - 1.
-        reward_defect_defect = 0.
-        reward_defect_coop = cooperation_factor / 2.  # Reward when I defect and opponent cooperates.
-        reward_coop_defect = cooperation_factor / 2. - 1  # Reward when I cooperate and opponent defects.
-        
-        # Define the reward matrix for the game.
-        self.reward_matrix = jnp.array([[reward_defect_defect, reward_defect_coop], 
-                                        [reward_coop_defect, reward_coop_coop]])
-        
-        # One-hot encoded representation of possible states.
-        self.state_representations = jnp.array([[[1, 0, 0, 1, 0, 0],  # Defect-Defect
-                                                 [1, 0, 0, 0, 1, 0]],  # Defect-Cooperate
-                                                [[0, 1, 0, 1, 0, 0],  # Cooperate-Defect
-                                                 [0, 1, 0, 0, 1, 0]]])  # Cooperate-Cooperate
-        
-        # Set the initial state.
-        if start_with_cooperation:
-            self.initial_state = jnp.array([0, 1, 0, 0, 1, 0])
+        self.n_agents = n_agents
+        self.cooperation_factor = cooperation_factor
+        self.start_with_cooperation = start_with_cooperation
+
+        # Build the initial state.
+        # If 'start_with_cooperation' is True, each agent's initial one-hot is [0,1,0].
+        # Otherwise, each agent's initial one-hot is [0,0,1] (the "start" slot).
+        onehots = []
+        if self.start_with_cooperation:
+            # All agents start as if they last "cooperated"
+            for _ in range(self.n_agents):
+                onehots.append(jnp.array([0., 1., 0.]))
         else:
-            self.initial_state = jnp.array([0, 0, 1, 0, 0, 1])
+            # All agents start in the "start" slot
+            for _ in range(self.n_agents):
+                onehots.append(jnp.array([0., 0., 1.]))
+
+        # Concatenate to get a (3*N,)-dim vector
+        self.initial_state = jnp.concatenate(onehots, axis=0)
 
     def reset(self, unused_key):
         """
