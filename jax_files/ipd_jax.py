@@ -2,13 +2,26 @@ import jax.numpy as jnp
 
 class IPD:
     """
-    A two-agent vectorized environment for the Iterated Prisoner's Dilemma (IPD).
-    Possible actions for each agent are (C)ooperate and (D)efect.
-    
-    Attributes:
-    - reward_matrix: Matrix representing the rewards for each combination of actions.
-    - state_representations: One-hot encoded representation of possible states.
-    - initial_state: Initial state of the game.
+    A generalized N-agent vectorized environment for the Iterated Prisoner's Dilemma (IPD).
+
+    Each agent can take one of two actions:
+        0 -> Defect (D)
+        1 -> Cooperate (C)
+
+    The environment state is a (3*N)-dimensional one-hot vector encoding the
+    last action of each agent as [1,0,0] = Defect, [0,1,0] = Cooperate, or [0,0,1] = Start.
+    For example, if N=2 and both agents cooperated last step, the state would be:
+        [0,1,0, 0,1,0].
+    If N=3 and agent0=Coop, agent1=Defect, agent2=Start, the state would be:
+        [0,1,0, 1,0,0, 0,0,1], and so on.
+
+    Rewards follow a generalized IPD payoff:
+        - Let c = number of cooperators among N agents at this step.
+        - Each cooperator gets (c * cooperation_factor / N) - 1
+        - Each defector gets (c * cooperation_factor / N).
+
+    If you set N=2, this reproduces the same payoff structure and learning
+    dynamics of the original 2-agent IPD code, but in a more flexible form.
     """
     
     def __init__(self, start_with_cooperation=False, cooperation_factor=1.33):
