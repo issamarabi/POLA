@@ -67,23 +67,57 @@ class IPD:
         """
         return self.initial_state, self.initial_state
 
-    def step(self, unused_state, action_agent1, action_agent2, unused_key):
+    def step(self, unused_state, *actions, unused_key=None):
         """
-        Execute a step in the game based on the actions of the two agents.
-        
+        Execute a step in the game based on the actions of N agents.
+
         Args:
-        - unused_state: Placeholder for the current state (not used in this method).
-        - action_agent1: Action taken by the first agent.
-        - action_agent2: Action taken by the second agent.
-        - unused_key: Placeholder for a random seed (not used in this method).
-        
+            unused_state: Unused in IPD, since our "state" is fully captured by last step's actions.
+            *actions: A variable-length tuple of length N, with each action in {0,1} = (D, C).
+            unused_key: A placeholder PRNG key (for vectorized usage).
+
         Returns:
-        - Tuple containing the new state, observation, and rewards for both agents.
+            (new_state, observation, rewards, None)
+
+            where:
+              - new_state:  (3*N,)-dim one-hot vector for each agent's new action.
+              - observation: identical to new_state (each agent sees the full last-action record).
+              - rewards: a tuple of length N, containing each agent's reward.
+              - None: placeholder for extra info (unused).
         """
-        reward_agent1 = self.reward_matrix[action_agent1, action_agent2]
-        reward_agent2 = self.reward_matrix[action_agent2, action_agent1]
-        new_state = self.state_representations[action_agent1, action_agent2]
+
+        # 1) Convert the *actions tuple into an array of shape (N,).
+        actions_array = jnp.array(actions, dtype=jnp.int32)  # shape = (N,)
+
+        # 2) Count the number of cooperators.
+        c = jnp.sum(actions_array)  # shape=(), sum of 0/1 actions
+
+        # 3) Compute each agent's reward with the formula:
+        #    base = (c * cooperation_factor) / N
+        #    if agent i cooperates => reward_i = base - 1
+        #    if agent i defects   => reward_i = base
+        base = (c * self.cooperation_factor) / float(self.n_agents)
+
+        def per_agent_reward(a):
+            # a=1 => cooperator => base -1
+            # a=0 => defector   => base
+            return jnp.where(a == 1, base - 1.0, base)
+
+        rewards_array = jnp.vectorize(per_agent_reward)(actions_array)
+        rewards_tuple = tuple(rewards_array)  # e.g. (r1, r2, ..., rN)
+
+        # 4) Construct the new (3*N,)-dim state vector by one-hotting each agent's last action
+        #    Defect=0 => [1,0,0], Cooperate=1 => [0,1,0]. We never reuse the "start" slot after the first step.
+        new_onehots = []
+        for a in actions_array:
+            if a == 0:
+                new_onehots.append(jnp.array([1., 0., 0.]))  # Defect
+            else:
+                new_onehots.append(jnp.array([0., 1., 0.]))  # Cooperate
+
+        new_state = jnp.concatenate(new_onehots, axis=0)
+
+        # 5) In this setup, each agent sees the same "observation", i.e. the global last-action vector.
         observation = new_state
-        rewards = (reward_agent1, reward_agent2)
-        
-        return new_state, observation, rewards, None
+
+        return new_state, observation, rewards_tuple, None
