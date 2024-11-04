@@ -233,8 +233,7 @@ class CoinGame:
             new_positions_flat = new_positions[:, 0] * grid_size + new_positions[:, 1]
             new_coin_pos = self._generate_new_coin_pos(key, new_positions_flat)
             # re-sample coin color
-            coin_color_key = jax.random.fold_in(key, jnp.sum(state.step_count))
-            new_coin_color = jax.random.randint(coin_color_key, shape=(), minval=0, maxval=n_agents)
+            new_coin_color = (state.coin_color + 1) % n_agents
             return (new_coin_pos, new_coin_color)
 
         def old_coin_f():
