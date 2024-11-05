@@ -174,7 +174,7 @@ def test_step_no_pickup(n_agents, grid_size):
     actions = env.get_moves_away_from_coin(moves_towards)
 
     key_step, _ = random.split(key)
-    new_state, new_obs, rewards = env.step(state, actions, key_step)
+    new_state, new_obs, rewards, _ = env.step(state, actions, key_step)
 
     # Check positions vs. naive shift
     expected_positions = (state.agent_positions + MOVES[actions]) % grid_size
@@ -226,7 +226,7 @@ def test_step_pickup_single_agent():
     actions = jnp.array([0, 1, 1], dtype=jnp.int32)
 
     key = random.PRNGKey(123)
-    new_state, new_obs, rewards = env.step(state, actions, key)
+    new_state, new_obs, rewards, _ = env.step(state, actions, key)
 
     # Check new agent positions
     expected_positions = jnp.array([
@@ -282,7 +282,7 @@ def test_step_pickup_multiple_agents():
     actions = jnp.array([0, 1, 3], dtype=jnp.int32)
 
     key = random.PRNGKey(999)
-    new_state, new_obs, rewards = env.step(state, actions, key)
+    new_state, new_obs, rewards, _ = env.step(state, actions, key)
 
     # Agents 0 and 1 pick up => each gets +1
     # coin_color = 2 => that agent (2) gets -2 for *each* agent that picks up.
