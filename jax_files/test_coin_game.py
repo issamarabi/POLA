@@ -410,5 +410,44 @@ def test_get_coop_actions(n_agents, grid_size):
     # but the function still systematically picks it for that agent. We just ensure no crash.
 
 
+@pytest.mark.parametrize("n_agents, grid_size", [
+    (2, 3),
+    (3, 5),
+])
+def test_step_coin_color_sequence(n_agents, grid_size):
+    """
+    Test that the coin_color in 'step' function is generated sequentially:
+      - After each pickup, the new coin_color should be the next color in sequence,
+        *only when a pickup occurs*.
+    """
+    env = CoinGame(n_agents=n_agents, grid_size=grid_size)
+    key = random.PRNGKey(0)
+
+    state, _ = env.reset(key)
+    current_coin_color = state.coin_color
+
+    for _ in range(5):  # Perform a few steps to check the sequence
+        # Generate actions (e.g., move towards coin, or even random actions)
+        actions = env.get_moves_towards_coin(state) # move towards coin
+
+        key_step, key = random.split(key)
+        new_state, _, _, _ = env.step(state, actions, key_step)
+
+        picks_up = jnp.any(jnp.all(new_state.agent_positions == state.coin_pos, axis=-1))
+
+        if picks_up: # only check coin color if pickup occurred
+            expected_coin_color = (current_coin_color + 1) % n_agents
+            assert new_state.coin_color == expected_coin_color, (
+                f"Coin color sequence is broken after pickup. Expected {expected_coin_color}, "
+                f"but got {new_state.coin_color} after step from color {current_coin_color}."
+            )
+            current_coin_color = new_state.coin_color # update only on pickup
+        else:
+            # if no pickup, coin_color should remain the same (or we don't care in this test)
+            pass # no check needed, or you could assert new_state.coin_color == current_coin_color
+
+        state = new_state
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
