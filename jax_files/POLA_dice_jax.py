@@ -14,7 +14,6 @@ from flax.training.train_state import TrainState
 from flax.training import checkpoints
 
 from tensorflow_probability.substrates import jax as tfp
-
 tfd = tfp.distributions
 
 from coin_game_jax import CoinGame
@@ -64,9 +63,9 @@ def get_gae_advantages(rewards, values, next_val_history):
     return advantages
 
 
-###############################################################################
-#                          Core DiCE / GAE Objectives                         #
-###############################################################################
+################################################################################
+#                          Core DiCE / GAE Objectives                          #
+################################################################################
 
 @jit
 def dice_objective(self_logprobs, other_logprobs, rewards, values, end_state_v):
@@ -176,10 +175,9 @@ def dice_objective_plus_value_loss(self_logprobs, other_logprobs, rewards, value
         return reward_loss
 
 
-
-###############################################################################
-#                           Acting in the Environment                         #
-###############################################################################
+################################################################################
+#                           Acting in the Environment                          #
+################################################################################
 
 @jit
 def act(scan_carry, _):
@@ -1245,7 +1243,6 @@ def opp_model_selfagent2(key, true_th1, true_val1, th2, val2,
     return scan_carry[5], scan_carry[6]  # om_th1, om_val1
 
 
-
 ###############################################################################
 #                           Main Training Loop                                #
 ###############################################################################
@@ -1536,10 +1533,9 @@ def play(key, init_th1, init_val1, init_th2, init_val2, use_opp_model=False):
     return []  # or return any final metrics
 
 
-###############################################################################
+################################################################################
 #                             Main Script Entry                                #
-###############################################################################
-
+################################################################################
 
 if __name__ == "__main__":
 
@@ -1567,6 +1563,7 @@ if __name__ == "__main__":
     # -------------------- Environment / Task --------------------
     parser.add_argument("--env", type=str, default="coin", choices=["ipd", "coin"],
                         help="Which environment to run: 'ipd' or 'coin'.")
+    parser.add_argument("--n_agents", type=int, default=2, help="Number of agents.")
     parser.add_argument("--grid_size", type=int, default=3,
                         help="Grid size for Coin Game (only 3 is implemented as of 2/2/2025).")
     parser.add_argument("--contrib_factor", type=float, default=1.33,
@@ -1628,9 +1625,9 @@ if __name__ == "__main__":
     parser.add_argument("--std", type=float, default=0.1,
                         help="Standard deviation for initialization of policy/value parameters")
 
+    global args
     args = parser.parse_args()
-
-    # Determine if we use a baseline (value function)
+    global use_baseline
     use_baseline = not args.no_baseline
 
     # Set random seed
@@ -1638,24 +1635,20 @@ if __name__ == "__main__":
     key = jax.random.PRNGKey(args.seed)
 
     # Setup the environment
-    if args.env == 'coin':
-        assert args.grid_size == 3  # rest not implemented yet
+    n_agents = args.n_agents
 
-        env = CoinGame(
-            grid_size=args.grid_size,
-            # same_coin_reward=args.same_coin_reward,
-            # diff_coin_reward=args.diff_coin_reward,
-            # diff_coin_cost=args.diff_coin_cost,
-            # split_coins=args.split_coins
-        )
-        input_size = args.grid_size ** 2 * 4  # for a 3x3 grid with 4 channels, e.g.
+    if args.env == 'coin':
+        env = CoinGame(n_agents=n_agents, grid_size=args.grid_size)
+        input_size = 2 * n_agents * args.grid_size * args.grid_size
         action_size = 4  # up / down / left / right
-        
+
     elif args.env == 'ipd':
-        env = IPD(init_state_coop=args.init_state_coop, contrib_factor=args.contrib_factor)
-        input_size = 6  # 3 * n_agents
+        env = IPD(n_agents=n_agents,
+                  start_with_cooperation=args.init_state_coop,
+                  cooperation_factor=args.contrib_factor)
+        input_size = 3 * n_agents
         action_size = 2  # cooperate or defect
-        
+
     else:
         raise NotImplementedError("Unsupported environment type.")
 
@@ -1663,10 +1656,8 @@ if __name__ == "__main__":
     vec_env_reset = jax.vmap(env.reset)
     vec_env_step = jax.vmap(env.step)
 
-    # Create initial trainstates (policies & values) for both agents
-    trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2 = get_init_trainstates(
-        key, action_size, input_size
-    )
+    # Create *lists* of initial TrainState objects for each of the n_agents
+    trainstates_p, trainstates_val = get_init_trainstates(key, n_agents, action_size, input_size)
 
     # Optionally load from a checkpoint
     if args.load_dir is not None and args.load_prefix is not None:
@@ -1680,10 +1671,10 @@ if __name__ == "__main__":
         if epoch_num % 10 == 0:
             epoch_num += 1  # Temporary fix as per original code comments
 
-        score_record = [jnp.zeros((2,))] * epoch_num
+        # Initialize records based on number of agents
+        score_record = [jnp.zeros((args.n_agents,))] * epoch_num
         vs_fixed_strats_score_record = [
-            [jnp.zeros((3,))] * epoch_num, 
-            [jnp.zeros((3,))] * epoch_num
+            [jnp.zeros((3,))] * epoch_num for _ in range(args.n_agents)
         ]
 
         # Initialize coins_collected_info based on environment
@@ -1699,21 +1690,27 @@ if __name__ == "__main__":
         restored_tuple = checkpoints.restore_checkpoint(
             ckpt_dir=args.load_dir,
             target=(
-                trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2,
+                *trainstates_p, *trainstates_val,
                 coins_collected_info,
                 score_record,
                 vs_fixed_strats_score_record
             ),
+            step=epoch_num,
             prefix=args.load_prefix
         )
 
         # Unpack the restored data
-        trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, \
-        coins_collected_info, score_record, vs_fixed_strats_score_record = restored_tuple
-
+        # Assuming the order matches the initialization
+        trainstates_p = list(restored_tuple[:args.n_agents])
+        trainstates_val = list(restored_tuple[args.n_agents:2 * args.n_agents])
+        coins_collected_info = restored_tuple[2 * args.n_agents]
+        score_record = restored_tuple[2 * args.n_agents + 1]
+        vs_fixed_strats_score_record = restored_tuple[2 * args.n_agents + 2]
 
     # Finally, run the main training loop
-    play(key,
-         trainstate_th1, trainstate_val1,
-         trainstate_th2, trainstate_val2,
-         use_opp_model=args.opp_model)
+    play(
+        key,
+        trainstates_p, trainstates_val,  # List of policy and value TrainStates for all agents
+        trainstates_p, trainstates_val,  # Pass the same lists as 'self' agents (to be handled in 'play')
+        use_opp_model=args.opp_model
+    )
