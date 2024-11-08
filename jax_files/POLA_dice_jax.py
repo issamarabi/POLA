@@ -1247,38 +1247,21 @@ def opp_model_selfagent2(key, true_th1, true_val1, th2, val2,
 #                           Main Training Loop                                #
 ###############################################################################
 
-def get_init_trainstates(key, action_size_, input_size_):
+
+def get_init_trainstates(key, n_agents, action_size_, input_size_):
     """
-    Create initial (TrainState) for policy and value RNNs for each agent.
+    Create a policy and value TrainState for EACH of the n_agents.
+    Return them as two lists:
+        trainstate_th[i] = policy TrainState for agent i
+        trainstate_val[i] = value TrainState for agent i
     """
-    key, key_p1, key_v1, key_p2, key_v2 = jax.random.split(key, 5)
+    # We create separate RNN modules for each agent
+    # and separate train states for each agent's policy and value.
 
-    theta_p1 = RNN(num_outputs=action_size_,
-                   num_hidden_units=args.hidden_size,
-                   layers_before_gru=args.layers_before_gru)
-    theta_v1 = RNN(num_outputs=1,
-                   num_hidden_units=args.hidden_size,
-                   layers_before_gru=args.layers_before_gru)
-    theta_p2 = RNN(num_outputs=action_size_,
-                   num_hidden_units=args.hidden_size,
-                   layers_before_gru=args.layers_before_gru)
-    theta_v2 = RNN(num_outputs=1,
-                   num_hidden_units=args.hidden_size,
-                   layers_before_gru=args.layers_before_gru)
+    n_keys_needed = 1 + 2*n_agents
+    agent_keys = jax.random.split(key, n_keys_needed)[1:]
 
-    theta_p1_params = theta_p1.init(key_p1,
-                                    jnp.ones([args.batch_size, input_size_]),
-                                    jnp.zeros(args.hidden_size))
-    theta_v1_params = theta_v1.init(key_v1,
-                                    jnp.ones([args.batch_size, input_size_]),
-                                    jnp.zeros(args.hidden_size))
-    theta_p2_params = theta_p2.init(key_p2,
-                                    jnp.ones([args.batch_size, input_size_]),
-                                    jnp.zeros(args.hidden_size))
-    theta_v2_params = theta_v2.init(key_v2,
-                                    jnp.ones([args.batch_size, input_size_]),
-                                    jnp.zeros(args.hidden_size))
-
+    # Prepare the chosen outer optimizer & value optimizer
     if args.optim.lower() == 'adam':
         theta_optimizer = optax.adam(learning_rate=args.lr_out)
         value_optimizer = optax.adam(learning_rate=args.lr_v)
@@ -1288,27 +1271,46 @@ def get_init_trainstates(key, action_size_, input_size_):
     else:
         raise Exception("Unknown or Not Implemented Optimizer")
 
-    trainstate_th1 = TrainState.create(
-        apply_fn=theta_p1.apply,
-        params=theta_p1_params,
-        tx=theta_optimizer
-    )
-    trainstate_val1 = TrainState.create(
-        apply_fn=theta_v1.apply,
-        params=theta_v1_params,
-        tx=value_optimizer
-    )
-    trainstate_th2 = TrainState.create(
-        apply_fn=theta_p2.apply,
-        params=theta_p2_params,
-        tx=theta_optimizer
-    )
-    trainstate_val2 = TrainState.create(
-        apply_fn=theta_v2.apply,
-        params=theta_v2_params,
-        tx=value_optimizer
-    )
-    return trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2
+    trainstate_th = []
+    trainstate_val = []
+
+    for i in range(n_agents):
+        key_p = agent_keys[2*i]
+        key_v = agent_keys[2*i+1]
+
+        # Create the RNN modules
+        theta_p = RNN(num_outputs=action_size_,
+                      num_hidden_units=args.hidden_size,
+                      layers_before_gru=args.layers_before_gru)
+        theta_v = RNN(num_outputs=1,
+                      num_hidden_units=args.hidden_size,
+                      layers_before_gru=args.layers_before_gru)
+
+        # Initialize parameters
+        theta_p_params = theta_p.init(key_p,
+                                      jnp.ones([args.batch_size, input_size_]),
+                                      jnp.zeros(args.hidden_size))
+        theta_v_params = theta_v.init(key_v,
+                                      jnp.ones([args.batch_size, input_size_]),
+                                      jnp.zeros(args.hidden_size))
+
+        # Create TrainStates
+        train_p_state = TrainState.create(
+            apply_fn=theta_p.apply,
+            params=theta_p_params,
+            tx=theta_optimizer
+        )
+        train_v_state = TrainState.create(
+            apply_fn=theta_v.apply,
+            params=theta_v_params,
+            tx=value_optimizer
+        )
+
+        trainstate_th.append(train_p_state)
+        trainstate_val.append(train_v_state)
+
+    return trainstate_th, trainstate_val
+
 
 @jit
 def eval_progress(subkey, th1, val1, th2, val2):
@@ -1422,7 +1424,9 @@ def play(key, init_th1, init_val1, init_th2, init_val2, use_opp_model=False):
 
     if args.opp_model:
         key, subkey = jax.random.split(key)
-        agent1_om_th2, agent1_om_val2, agent2_om_th1, agent2_om_val1 = get_init_trainstates(subkey, action_size, input_size)
+        th, val = get_init_trainstates(subkey, 2, action_size, input_size)
+        agent1_om_th2, agent1_om_val2, agent2_om_th1, agent2_om_val1 = th[0], val[0], th[1], val[1]
+
 
     # Evaluate initial performance
     key, subkey = jax.random.split(key)
