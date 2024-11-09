@@ -182,30 +182,79 @@ def dice_objective_plus_value_loss(self_logprobs, other_logprobs, rewards, value
 @jit
 def act(scan_carry, _):
     """
-    Makes a single step action with a policy RNN:
-    - sample the action from the categorical distribution,
-    - compute log probability of the action,
-    - optionally compute value if use_baseline is True.
+    N-agent version: loop over each agent to get its action, log prob, and (optionally) value.
+
+    scan_carry = (key, obs_batch, trainstates_p, trainstates_v, hidden_ps, hidden_vs)
+      - key: PRNG key
+      - obs_batch: [batch_size, obs_dim], the environment observations (shared or global)
+      - trainstates_p: list of length n_agents with policy TrainStates
+      - trainstates_v: list of length n_agents with value TrainStates (if use_baseline)
+      - hidden_ps: list of length n_agents, each shape [batch_size, hidden_size] (policy RNN)
+      - hidden_vs: list of length n_agents, same shape if use_baseline else None
+
+    Returns:
+      new_scan_carry, auxiliary
+        - new_scan_carry is the updated state
+        - auxiliary = (all_actions, all_log_probs, all_values, hidden_ps, hidden_vs,
+                       all_softmax_logits, all_logits)
     """
-    (key, obs_batch, trainstate_p, trainstate_p_params,
-     trainstate_v, trainstate_v_params, hidden_p, hidden_v) = scan_carry
+    (key, obs_batch, p_states, v_states, hidden_p, hidden_v) = scan_carry
+    n_agents = len(p_states)
 
-    hidden_p, logits = trainstate_p.apply_fn(trainstate_p_params, obs_batch, hidden_p)
-    dist = tfd.Categorical(logits=logits)
-    key, subkey = jax.random.split(key)
-    actions = dist.sample(seed=subkey)
-    log_probs_actions = dist.log_prob(actions)
+    all_actions = []
+    all_log_probs = []
+    all_values = []
+    all_logits = []
+    all_softmax_probs = []
 
-    if use_baseline:
-        hidden_v, values = trainstate_v.apply_fn(trainstate_v_params, obs_batch, hidden_v)
-        ret_vals = values.squeeze(-1)
-    else:
-        hidden_v, ret_vals = None, None
+    # We will update hidden_ps[i], hidden_vs[i] for each agent i
+    for i in range(n_agents):
+        # Forward pass for the i-th agent's policy RNN
+        hidden_p_i, logits_i = p_states[i].apply_fn(
+            p_states[i].params,
+            obs_batch,
+            hidden_p[i]   # agent i's hidden state
+        )
+        dist_i = tfd.Categorical(logits=logits_i)
+        key, subkey = jax.random.split(key)
+        action_i = dist_i.sample(seed=subkey)
+        logprob_i = dist_i.log_prob(action_i)
 
-    new_scan_carry = (key, obs_batch, trainstate_p, trainstate_p_params,
-                      trainstate_v, trainstate_v_params, hidden_p, hidden_v)
-    auxiliary = (actions, log_probs_actions, ret_vals, hidden_p, hidden_v,
-                 jax.nn.softmax(logits), logits)
+        # Forward pass value RNN if baselines are on
+        if use_baseline:
+            hidden_v_i, value_i = v_states[i].apply_fn(
+                v_states[i].params,
+                obs_batch,
+                hidden_v[i]
+            )
+            value_i = value_i.squeeze(-1)  # shape [batch_size]
+        else:
+            hidden_v_i, value_i = None, jnp.zeros_like(logprob_i)
+
+        # Update the hidden states in the lists
+        hidden_p = hidden_p.at[i].set(hidden_p_i)
+        if use_baseline:
+            hidden_v = hidden_v.at[i].set(hidden_v_i)
+
+        # Collect all agent i’s data
+        all_actions.append(action_i)
+        all_log_probs.append(logprob_i)
+        all_values.append(value_i)
+        all_softmax_probs.append(jax.nn.softmax(logits_i))
+        all_logits.append(logits_i)
+
+    # Each list has length n_agents, each element shape [batch_size]
+    # Stack them along axis=1 => shape [batch_size, n_agents]
+    actions_arr = jnp.stack(all_actions, axis=1)
+    log_probs_arr = jnp.stack(all_log_probs, axis=1)
+    values_arr = jnp.stack(all_values, axis=1)
+    # For softmax/logits we might want shape [batch_size, n_agents, action_dim]
+    softmax_arr = jnp.stack(all_softmax_probs, axis=1)
+    logits_arr = jnp.stack(all_logits, axis=1)
+
+    new_scan_carry = (key, obs_batch, p_states, v_states, hidden_p, hidden_v)
+    auxiliary = (actions_arr, log_probs_arr, values_arr,
+                 hidden_p, hidden_v, softmax_arr, logits_arr)
     return new_scan_carry, auxiliary
 
 @jit
