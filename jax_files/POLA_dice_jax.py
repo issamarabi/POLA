@@ -260,15 +260,25 @@ def act(scan_carry, _):
 @jit
 def act_w_iter_over_obs(scan_carry, env_batch_obs):
     """
-    jax.lax.scan wrapper to iterate over multiple observations in the environment 
-    rollout and apply `act` at each step.
+    Iterates over multiple time steps (env_batch_obs) via jax.lax.scan 
+    and calls `act` for each time step.
+
+    env_batch_obs: [batch_size, obs_dim] is the observation at this time step
+                   that we pass to all agents.
     """
-    key, p_state, p_params, v_state, v_params, h_p, h_v = scan_carry
-    key, subkey = jax.random.split(key)
-    act_input = (subkey, env_batch_obs, p_state, p_params, v_state, v_params, h_p, h_v)
+    (key, trainstates_p, trainstates_v, hidden_ps, hidden_vs) = scan_carry
+
+    # We pass the same obs_batch to `act`, which loops over n_agents
+    # and returns a stacked set of actions, log_probs, etc.
+    act_input = (key, env_batch_obs, trainstates_p, trainstates_v, hidden_ps, hidden_vs)
     new_act_input, act_aux = act(act_input, None)
-    (_, _, p_state, p_params, v_state, v_params, h_p, h_v) = new_act_input
-    new_scan_carry = (key, p_state, p_params, v_state, v_params, h_p, h_v)
+
+    (new_key, _, new_trainstates_p, new_trainstates_v,
+     new_hidden_ps, new_hidden_vs) = new_act_input
+    # act_aux is (actions, log_probs, values, hidden_ps, hidden_vs, softmax_probs, logits)
+
+    new_scan_carry = (new_key, new_trainstates_p, new_trainstates_v,
+                      new_hidden_ps, new_hidden_vs)
     return new_scan_carry, act_aux
 
 @jit
