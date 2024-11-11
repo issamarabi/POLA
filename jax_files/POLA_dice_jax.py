@@ -358,20 +358,40 @@ class RNN(nn.Module):
 ###############################################################################
 
 @jit
-def get_policies_for_states(key, train_p, train_p_params, train_v, train_v_params, obs_hist):
+def get_policies_for_states(
+    key,
+    trainstates_p,    # list of policy TrainStates for n_agents
+    trainstates_v,    # list of value TrainStates for n_agents
+    obs_hist          # shape [rollout_len, batch_size, obs_dim]
+):
     """
-    Iterates over obs_hist with a policy RNN, returning the probability 
-    distribution for each time step's observation. 
-    Does not return values. 
+    N-agent version: For a batch of environment states over 'rollout_len' time steps,
+    returns the softmax action probabilities for each agent at each time step.
+
+    Returns: cat_act_probs_list with shape [rollout_len, batch_size, n_agents, action_size]
     """
-    h_p = jnp.zeros((args.batch_size, args.hidden_size))
-    h_v = jnp.zeros((args.batch_size, args.hidden_size)) if use_baseline else None
+    n_agents = len(trainstates_p)
+    T = obs_hist.shape[0]  # rollout_len
+
+    # Initialize hidden states for each agent: shape [batch_size, hidden_size]
+    hidden_ps = [jnp.zeros((args.batch_size, args.hidden_size)) for _ in range(n_agents)]
+    hidden_vs = [jnp.zeros((args.batch_size, args.hidden_size)) for _ in range(n_agents)] if use_baseline else [None]*n_agents
+
     key, subkey = jax.random.split(key)
-    init_scan_carry = (subkey, train_p, train_p_params, train_v, train_v_params, h_p, h_v)
-    obs_hist_for_scan = jnp.stack(obs_hist[:args.rollout_len], axis=0) # skips the last observation
-    final_scan_carry, aux_lists = jax.lax.scan(act_w_iter_over_obs, init_scan_carry, obs_hist_for_scan, args.rollout_len)
-    (_, _, _, _, _, _, _), (a_list, lp_list, v_list, h_p_list, h_v_list, cat_act_probs_list, logits_list) = (final_scan_carry, aux_lists)
-    return cat_act_probs_list
+    init_scan_carry = (subkey, trainstates_p, trainstates_v, hidden_ps, hidden_vs)
+
+    def scan_body(scan_carry, obs_t):
+        new_scan_carry, act_aux = act_w_iter_over_obs(scan_carry, obs_t)
+        # act_aux => (actions, log_probs, values, hidden_ps, hidden_vs, softmax, logits)
+        softmax_ = act_aux[5]  # shape [batch_size, n_agents, action_size]
+        return new_scan_carry, softmax_
+
+    final_scan_carry, cat_act_probs_seq = jax.lax.scan(
+        scan_body, init_scan_carry, obs_hist, length=T
+    )
+    # cat_act_probs_seq => shape [T, batch_size, n_agents, action_size]
+    return cat_act_probs_seq
+
 
 @jit
 def get_policies_and_values_for_states(key, train_p, train_p_params, train_v, train_v_params, obs_hist):
