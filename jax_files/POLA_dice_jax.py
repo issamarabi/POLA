@@ -365,10 +365,11 @@ def get_policies_for_states(
     obs_hist          # shape [rollout_len, batch_size, obs_dim]
 ):
     """
-    N-agent version: For a batch of environment states over 'rollout_len' time steps,
-    returns the softmax action probabilities for each agent at each time step.
+    N-agent version: For a sequence of T (rollout_len) observations, returns the softmax action
+    probabilities for each agent at each time step. Handles both single-batch
+    (batch_size=1) and multi-batch scenarios.
 
-    Returns: cat_act_probs_list with shape [rollout_len, batch_size, n_agents, action_size]
+    Returns: cat_act_probs_list with shape [T, batch_size, n_agents, action_size]
     """
     n_agents = len(trainstates_p)
     T = obs_hist.shape[0]  # rollout_len
@@ -391,7 +392,6 @@ def get_policies_for_states(
     )
     # cat_act_probs_seq => shape [T, batch_size, n_agents, action_size]
     return cat_act_probs_seq
-
 
 @jit
 def get_policies_and_values_for_states(key, train_p, train_p_params, train_v, train_v_params, obs_hist):
@@ -1443,7 +1443,7 @@ def eval_progress(subkey, th1, val1, th2, val2):
     return avg_r1, avg_r2, rr_matches_amount, rb_matches_amount, br_matches_amount, bb_matches_amount, jnp.stack(score1rec), jnp.stack(score2rec)
 
 
-def inspect_ipd(th1, val1, th2, val2):
+def inspect_ipd(trainstates_p, trainstates_val):
     """
     Inspect policies of TWO agents in IPD env across all possible state histories up to two steps.
     """
@@ -1451,14 +1451,7 @@ def inspect_ipd(th1, val1, th2, val2):
     # Initialize PRNG key and reset the vectorized environment
     key = jax.random.PRNGKey(0)
     unused_keys = jax.random.split(key, args.batch_size)
-    state, obsv = vec_env_reset(unused_keys)
     init_state = env.init_state
-
-    # Define agents for streamlined processing
-    agents = [
-        ('Agent 1', th1, val1),
-        ('Agent 2', th2, val2)
-    ]
 
     # Generate all possible combinations of states for both agents (2 actions each)
     state_combinations = list(itertools.product(range(2), repeat=2))  # [(0,0), (0,1), (1,0), (1,1)]
@@ -1467,20 +1460,14 @@ def inspect_ipd(th1, val1, th2, val2):
     for (i, j), (ii, jj) in all_state_histories:
         state1 = env.states[i, j]
         state2 = env.states[ii, jj]
-        state_history = [init_state, state1, state2]
+        obs_hist = jnp.array([init_state, state1, state2]).reshape(3, 1, -1)
 
-        print(f"\nState History: {state_history}")
+        print(f"\nState History: {obs_hist}")
 
-        for agent_name, th, val in agents:
-            pol_probs = get_policies_for_states_onebatch(
-                key=jax.random.PRNGKey(0),
-                th_p_trainstate=th,
-                th_p_params=th.params,
-                th_v_trainstate=val,
-                th_v_params=val.params,
-                obs_hist=state_history
-            )
-            print(f"{agent_name} Policy Probabilities: {pol_probs}")
+        pol_probs = get_policies_for_states(
+            key, trainstates_p, trainstates_val, obs_hist
+        )
+        print(f"Policy Probabilities: {pol_probs}")
 
 
 def play(key, init_th1, init_val1, init_th2, init_val2, use_opp_model=False):
