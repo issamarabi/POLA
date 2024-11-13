@@ -409,16 +409,17 @@ def get_policies_and_values_for_states(key, train_p, train_p_params, train_v, tr
 
 def get_init_hidden_states():
     """
-    Returns initial hidden states for the policy & value RNNs.
+    Returns list of hidden states for each agent's policy (and value) RNN
     """
-    h_p1 = jnp.zeros((args.batch_size, args.hidden_size))
-    h_p2 = jnp.zeros((args.batch_size, args.hidden_size))
-    h_v1 = None
-    h_v2 = None
-    if use_baseline:
-        h_v1 = jnp.zeros((args.batch_size, args.hidden_size))
-        h_v2 = jnp.zeros((args.batch_size, args.hidden_size))
-    return h_p1, h_p2, h_v1, h_v2
+    hidden_p = []
+    hidden_v = []
+    for _ in range(args.n_agents):
+        hidden_p.append(jnp.zeros((args.batch_size, args.hidden_size)))
+        if use_baseline:
+            hidden_v.append(jnp.zeros((args.batch_size, args.hidden_size)))
+        else:
+            hidden_v.append(None)
+    return hidden_p, hidden_v
 
 
 ###############################################################################
