@@ -455,32 +455,6 @@ def do_env_rollout(key, th1, th1_params, val1, val1_params, th2, th2_params, val
     return final_scan_carry, aux, state_history
 
 
-# Do for only a single batch; only used for testing/inspection
-@jit
-def get_policies_for_states_onebatch(key, th_p_trainstate, th_p_trainstate_params, th_v_trainstate, th_v_trainstate_params, obs_hist):
-
-    h_p = jnp.zeros((1, args.hidden_size))
-    h_v = None
-    if use_baseline:
-        h_v = jnp.zeros((1, args.hidden_size))
-
-    key, subkey = jax.random.split(key)
-
-    act_args = (subkey, th_p_trainstate, th_p_trainstate_params,
-                th_v_trainstate, th_v_trainstate_params, h_p, h_v)
-    # Note that I am scanning using xs = obs_hist. Then the scan should work through the
-    # array of obs.
-    obs_hist_for_scan = jnp.stack(obs_hist[:len(obs_hist)], axis=0)
-
-    # act_args, aux_lists = jax.lax.scan(act_w_iter_over_obs, act_args, obs_hist_for_scan, args.rollout_len)
-    act_args, aux_lists = jax.lax.scan(act_w_iter_over_obs, act_args, obs_hist_for_scan, obs_hist_for_scan.shape[0])
-
-    a_list, lp_list, v_list, h_p_list, h_v_list, cat_act_probs_list, logits_list = aux_lists
-
-
-    return cat_act_probs_list
-
-
 ###############################################################################
 #    Inner-Loop Minimization for Opponent's Policy (POLA Inner Step)          #
 ###############################################################################
