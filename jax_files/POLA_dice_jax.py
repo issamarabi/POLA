@@ -837,10 +837,10 @@ def one_outer_step_update_selfagent2(scan_carry, _):
 ###############################################################################
 
 @jit
-def eval_vs_alld_selfagent1(scan_carry, _):
+def eval_vs_alld(scan_carry, _, self_agent):
     """
-    Evaluate agent1 vs "Always Defect" (ALLD) in IPD or "shortest path to coin" 
-    in CoinGame. Single step, repeated by jax.scan.
+    Evaluate agent vs "Always Defect" (ALLD) in IPD or "shortest path to coin"
+    in CoinGame, for a given self_agent (1 or 2). Single step, repeated by jax.scan.
     """
     (key, th, val, env_state, obs, h_p, h_v) = scan_carry
     key, subkey = jax.random.split(key)
@@ -855,39 +855,11 @@ def eval_vs_alld_selfagent1(scan_carry, _):
     if args.env == "ipd":
         a_opp = jnp.zeros_like(a)  # 0 => Defect in IPD
     elif args.env == "coin":
-        a_opp = env.get_moves_shortest_path_to_coin(env_state, red_agent_perspective=False)
+        a_opp = env.get_moves_shortest_path_to_coin(env_state, red_agent_perspective=self_agent != 1)
 
-    a1 = a
-    a2 = a_opp
-    env_state_next, new_obs, (r1, r2), aux_info = vec_env_step(env_state, a1, a2, env_subkeys)
-    score1 = r1.mean()
-    score2 = r2.mean()
+    a1 = a if self_agent == 1 else a_opp
+    a2 = a if self_agent == 2 else a_opp
 
-    new_scan_carry = (key, th, val, env_state_next, new_obs, h_p, h_v)
-    return new_scan_carry, (score1, score2)
-
-@jit
-def eval_vs_alld_selfagent2(scan_carry, _):
-    """
-    Evaluate agent2 vs "Always Defect" or "shortest path to coin" for coin game.
-    """
-    (key, th, val, env_state, obs, h_p, h_v) = scan_carry
-    key, subkey = jax.random.split(key)
-    act_args = (subkey, obs, th, th.params, val, val.params, h_p, h_v)
-    new_act_args, aux = act(act_args, None)
-    a, lp, v, h_p, h_v, cat_probs, logits = aux
-
-    keys = jax.random.split(key, args.batch_size + 1)
-    key = keys[0]
-    env_subkeys = keys[1:]
-
-    if args.env == "ipd":
-        a_opp = jnp.zeros_like(a)  # Always Defect
-    elif args.env == "coin":
-        a_opp = env.get_moves_shortest_path_to_coin(env_state, red_agent_perspective=True)
-
-    a2 = a
-    a1 = a_opp
     env_state_next, new_obs, (r1, r2), aux_info = vec_env_step(env_state, a1, a2, env_subkeys)
     score1 = r1.mean()
     score2 = r2.mean()
@@ -1045,10 +1017,7 @@ def eval_vs_fixed_strategy(key, train_th, train_val, strat="alld", self_agent=1)
 
     if strat == "alld":
         scan_carry = (key, train_th, train_val, env_state, obsv, h_p, h_v)
-        if self_agent == 1:
-            scan_carry, results = jax.lax.scan(eval_vs_alld_selfagent1, scan_carry, None, args.rollout_len)
-        else:
-            scan_carry, results = jax.lax.scan(eval_vs_alld_selfagent2, scan_carry, None, args.rollout_len)
+        scan_carry, results = jax.lax.scan(eval_vs_alld, scan_carry, None, self_agent, args.rollout_len)
     
     elif strat == "allc":
         scan_carry = (key, train_th, train_val, env_state, obsv, h_p, h_v)
