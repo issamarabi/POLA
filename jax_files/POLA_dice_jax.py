@@ -898,9 +898,10 @@ def eval_vs_allc(scan_carry, _, self_agent):
     return new_scan_carry, (score1, score2)
 
 @jit
-def eval_vs_tft_selfagent1(scan_carry, _):
+def eval_vs_tft(scan_carry, _, self_agent):
     """
-    Evaluate agent1 vs "Tit-for-Tat" (copy last move in IPD or reciprocal coin collection).
+    Evaluate agent vs "Tit-for-Tat" (TFT) strategy (copy last move in IPD or reciprocal coin collection),
+    for a given self_agent (1 or 2).
     """
     (key, th, val, env_state, obs, h_p, h_v, prev_a, prev_coop_coin_flag, r1_prev, r2_prev) = scan_carry
     key, subkey = jax.random.split(key)
@@ -917,51 +918,22 @@ def eval_vs_tft_selfagent1(scan_carry, _):
         a_opp = prev_a
         new_flag = None
     elif args.env == "coin":
+        if self_agent == 1:
+            r_opp = r2_prev
+            red_agent_perspective_opp = False
+        else:
+            r_opp = r1_prev
+            red_agent_perspective_opp = True
         # CoinGame "TFT" = if opponent recently took my coin => I do defect. Otherwise, I cooperate.
-        r_opp = r2_prev
         new_flag = jnp.where(r_opp < 0, 0, prev_coop_coin_flag)
         new_flag = jnp.where(r_opp > 0, 1, new_flag)
-        a_opp_defect = env.get_moves_shortest_path_to_coin(env_state, red_agent_perspective=False)
-        a_opp_coop = env.get_coop_action(env_state, red_agent_perspective=False)
+        a_opp_defect = env.get_moves_shortest_path_to_coin(env_state, red_agent_perspective=red_agent_perspective_opp)
+        a_opp_coop = env.get_coop_action(env_state, red_agent_perspective=red_agent_perspective_opp)
         a_opp = jnp.where(new_flag == 0, a_opp_defect, a_opp_coop)
 
-    a1 = a
-    a2 = jax.lax.stop_gradient(a_opp)
-    env_state_next, obs_next, (r1, r2), aux_info = vec_env_step(env_state, a1, a2, env_subkeys)
-    s1 = r1.mean()
-    s2 = r2.mean()
+    a1 = a if self_agent == 1 else jax.lax.stop_gradient(a_opp)
+    a2 = a if self_agent == 2 else jax.lax.stop_gradient(a_opp)
 
-    new_scan_carry = (key, th, val, env_state_next, obs_next, h_p, h_v, a, new_flag, r1, r2)
-    return new_scan_carry, (s1, s2)
-
-@jit
-def eval_vs_tft_selfagent2(scan_carry, _):
-    """
-    Evaluate agent2 vs "Tit-for-Tat".
-    """
-    (key, th, val, env_state, obs, h_p, h_v, prev_a, prev_coop_coin_flag, r1_prev, r2_prev) = scan_carry
-    key, subkey = jax.random.split(key)
-    act_args = (subkey, obs, th, th.params, val, val.params, h_p, h_v)
-    new_act_args, aux = act(act_args, None)
-    a, lp, v, h_p, h_v, cat_probs, logits = aux
-
-    keys = jax.random.split(key, args.batch_size + 1)
-    key = keys[0]
-    env_subkeys = keys[1:]
-
-    if args.env == "ipd":
-        a_opp = prev_a
-        new_flag = None
-    elif args.env == "coin":
-        r_opp = r1_prev
-        new_flag = jnp.where(r_opp < 0, 0, prev_coop_coin_flag)
-        new_flag = jnp.where(r_opp > 0, 1, new_flag)
-        a_opp_defect = env.get_moves_shortest_path_to_coin(env_state, red_agent_perspective=True)
-        a_opp_coop = env.get_coop_action(env_state, red_agent_perspective=True)
-        a_opp = jnp.where(new_flag == 0, a_opp_defect, a_opp_coop)
-
-    a2 = a
-    a1 = jax.lax.stop_gradient(a_opp)
     env_state_next, obs_next, (r1, r2), aux_info = vec_env_step(env_state, a1, a2, env_subkeys)
     s1 = r1.mean()
     s2 = r2.mean()
@@ -1016,10 +988,7 @@ def eval_vs_fixed_strategy(key, train_th, train_val, strat="alld", self_agent=1)
 
         scan_carry = (key, train_th, train_val, env_state, obsv, h_p, h_v,
                       prev_a, flag_init, r1_init, r2_init)
-        if self_agent == 1:
-            scan_carry, results = jax.lax.scan(eval_vs_tft_selfagent1, scan_carry, None, args.rollout_len)
-        else:
-            scan_carry, results = jax.lax.scan(eval_vs_tft_selfagent2, scan_carry, None, args.rollout_len)
+        scan_carry, results = jax.lax.scan(eval_vs_tft, scan_carry, None, self_agent, args.rollout_len)
     else:
         raise NotImplementedError("Unknown strategy for evaluation")
 
