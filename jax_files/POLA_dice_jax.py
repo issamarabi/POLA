@@ -284,39 +284,77 @@ def act_w_iter_over_obs(scan_carry, env_batch_obs):
 @jit
 def env_step(scan_carry, _):
     """
-    Single environment step for both agents (1 and 2). Each agent acts using 
-    policy RNN, obtains next state, rewards, etc.
+    N-agent version of a single environment step.
+    
+    scan_carry = (
+        key,
+        env_state,         # shape [batch_size, ...] environment internal state
+        obs,               # shape [batch_size, obs_dim], shared
+        p_states,          # list of length n_agents: each agent's policy TrainState
+        v_states,          # list of length n_agents: each agent's value TrainState (if baseline)
+        hidden_p,          # list of length n_agents: policy RNN states
+        hidden_v           # list of length n_agents: value RNN states
+    )
+
+    Returns: (new_scan_carry, (per_agent_info, env_aux))
+
+    - per_agent_info: a list (length n_agents), where each entry has the
+        (softmax_i, obs, logprob_i, value_i, reward_i, action_i) for agent i
+    - env_aux: any environment-specific auxiliary info (e.g. coin-match indicators)
     """
-    (key, env_state, obs1, obs2,
-     th1, th1_params, val1, val1_params,
-     th2, th2_params, val2, val2_params,
-     h_p1, h_v1, h_p2, h_v2) = scan_carry
+    (key, env_state, obs, p_states, v_states, hidden_p, hidden_v) = scan_carry
 
-    key, key1, key2, env_key = jax.random.split(key, 4)
+    # 1) Generate subkeys for the environment step
+    subkeys = jax.random.split(key, args.batch_size + 1)
+    key = subkeys[0]
+    env_subkeys = subkeys[1:]
 
-    # Agent 1 step
-    act_args1 = (key1, obs1, th1, th1_params, val1, val1_params, h_p1, h_v1)
-    _, aux1 = act(act_args1, None)
-    a1, lp1, v1, h_p1, h_v1, cat_probs1, logits1 = aux1
+    # 2) All agents act simultaneously
+    act_carry = (key, obs, p_states, v_states, hidden_p, hidden_v)
+    _, aux_act = act(act_carry, None)
+    (
+        all_actions,       # [batch_size, n_agents]
+        all_log_probs,     # [batch_size, n_agents]
+        all_values,        # [batch_size, n_agents]
+        hidden_p,          # updated policy RNN states
+        hidden_v,          # updated value RNN states
+        softmax_arr,       # [batch_size, n_agents, action_dim]
+        logits_arr         # [batch_size, n_agents, action_dim]
+    ) = aux_act
 
-    # Agent 2 step
-    act_args2 = (key2, obs2, th2, th2_params, val2, val2_params, h_p2, h_v2)
-    _, aux2 = act(act_args2, None)
-    a2, lp2, v2, h_p2, h_v2, cat_probs2, logits2 = aux2
+    # 3) Environment step with these N actions
+    new_env_state, new_obs, rewards, env_aux = vec_env_step(
+        env_state,
+        all_actions,      # shape [batch_size, n_agents]
+        env_subkeys       # shape [batch_size, ...]
+    )
+    # rewards => shape [batch_size, n_agents]
 
-    env_subkeys = jax.random.split(env_key, args.batch_size)
-    env_state_next, obs_next, (r1, r2), aux_info = vec_env_step(env_state, a1, a2, env_subkeys)
+    # 4) Build new scan carry
+    new_scan_carry = (
+        key,
+        new_env_state,    # updated env
+        new_obs,          # updated obs
+        p_states,
+        v_states,
+        hidden_p,
+        hidden_v
+    )
 
-    scan_carry_next = (key, env_state_next, obs_next, obs_next,
-                       th1, th1_params, val1, val1_params,
-                       th2, th2_params, val2, val2_params,
-                       h_p1, h_v1, h_p2, h_v2)
+    # 5) Build a "per_agent_info" structure: for each agent i, store relevant data
+    #    so we can compute losses or analyze afterwards.
+    per_agent_info = []
+    for i in range(args.n_agents):
+        per_agent_info.append((
+            softmax_arr[:, i, :],   # shape [batch_size, action_dim]
+            obs,                    # shape [batch_size, obs_dim], old obs
+            all_log_probs[:, i],    # shape [batch_size]
+            all_values[:, i],       # shape [batch_size]
+            rewards[:, i],          # shape [batch_size]
+            all_actions[:, i],      # shape [batch_size]
+        ))
 
-    # Aux for each agent is (policy distribution, obs, self_logprob, other_logprob, self_values, reward, self_action, other_action)
-    aux1_out = (cat_probs1, obs_next, lp1, lp2, v1, r1, a1, a2)
-    aux2_out = (cat_probs2, obs_next, lp2, lp1, v2, r2, a2, a1)
-
-    return scan_carry_next, (aux1_out, aux2_out, aux_info)
+    return new_scan_carry, per_agent_info
 
 
 ###############################################################################
