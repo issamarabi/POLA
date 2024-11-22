@@ -878,52 +878,58 @@ def one_outer_step_update_selfagent2(scan_carry, _):
 def eval_vs_alld(scan_carry, _):
     """
     Single-step logic for evaluating one agent (self_agent) while all others do 'ALLD'.
-    
-    scan_carry = (
-        key,
-        p_states, v_states,
-        env_state, obs,
-        hidden_p, hidden_v,
-        self_agent_index
-    )
-    Returns: (new_scan_carry, mean_rewards_per_agent)
+    We override the other agents' actions with 'defect' (IPD) or 'shortest path' (CoinGame).
     """
-    (key, p_states, v_states, env_state, obs, hidden_p, hidden_v, self_agent) = scan_carry
+    (key, p_states, v_states,
+     env_state, obs_batch,
+     hidden_p, hidden_v,
+     self_agent_idx) = scan_carry
 
-    # 1) Agents all 'act(...)'
-    act_carry = (key, obs, p_states, v_states, hidden_p, hidden_v)
-    _, aux = act(act_carry, None)
-    (actions, log_probs, values, hidden_p, hidden_v,
-     softmax_arr, logits_arr) = aux
+    key, subkey = jax.random.split(key)
+    scan_carry_act = (subkey, obs_batch, p_states, v_states, hidden_p, hidden_v)
+    scan_carry_act, aux_act = act(scan_carry_act, None)
+    (actions_arr, log_probs_arr, values_arr,
+     hidden_p, hidden_v, softmax_arr, logits_arr) = aux_act  # shape [batch_size, n_agents, ...]
 
-    # 2) Overwrite the actions of all agents != self_agent with "defect" or
-    #    "towards coin". This is 'ALLD' for the others.
+    # Overwrite the *other* agents' actions with 'defect' or 'move_to_coin'
     if args.env == "ipd":
-        fix_action_for_others = jnp.zeros_like(actions[:, 0])  # 0 => Defect
-    elif args.env == "coin":
-        # For coin: get the moves that correspond to 'defect' from environment
-        # shape [batch_size, n_agents]
-        all_defect_moves = env.get_moves_towards_coin(env_state)  
-        # We'll pick all_defect_moves[:, i] for each agent i
-        # We'll do a gather below
-        fix_action_for_others = all_defect_moves
+        # 'defect' = 0
+        # Keep self_agent_idx as is, override others
+        def overwrite_ipd(a, i):
+            return jnp.where(i == self_agent_idx, a, 0)
+        agent_idxs = jnp.arange(actions_arr.shape[1])
+        actions_arr = jax.vmap(
+            lambda row: jax.vmap(overwrite_ipd, in_axes=(0,0))(row, agent_idxs)
+        )(actions_arr)
+    else:
+        # 'defect' in coin => "move_towards_coin"
+        env_subkeys = jax.random.split(key, args.batch_size)
+        # get the "defect" action for each agent => shape [batch_size, n_agents]
+        # then, for agent i != self_agent_idx, override
+        moves_toward = env.get_moves_towards_coin(env_state)  # shape [batch_size, n_agents]
+        def overwrite_coin(a, d, i):
+            # keep a if i == self_agent_idx, else d
+            return jnp.where(i == self_agent_idx, a, d)
+        agent_idxs = jnp.arange(moves_toward.shape[1])
+        actions_arr = jax.vmap(
+            lambda row, def_row: jax.vmap(overwrite_coin, in_axes=(0,0,0))(row, def_row, agent_idxs)
+        )(actions_arr, moves_toward)
 
-    mask = jnp.arange(args.n_agents) == self_agent
-    new_actions = jnp.where(mask[None, :], actions, fix_action_for_others)
+    # Environment step
+    env_subkeys = jax.random.split(key, args.batch_size)
+    env_state_next, obs_next, rewards, env_info = vec_env_step(env_state, actions_arr, env_subkeys)
 
-    # 3) Step the environment
-    subkeys = jax.random.split(key, args.batch_size+1)
-    key = subkeys[0]
-    env_subkeys = subkeys[1:]
-    new_env_state, new_obs, rewards, _ = vec_env_step(env_state, new_actions, env_subkeys)
+    # We'll measure the self-agent's average reward, but you can store all if you wish
+    r_self = rewards[:, self_agent_idx].mean()
 
-    # 4) Summaries for logging
-    new_scan_carry = (
+    # Build new scan_carry
+    scan_carry_next = (
         key, p_states, v_states,
-        new_env_state, new_obs,
-        hidden_p, hidden_v, self_agent
+        env_state_next, obs_next,
+        hidden_p, hidden_v,
+        self_agent_idx
     )
-    return new_scan_carry, jnp.mean(rewards, axis=0)
+    return scan_carry_next, r_self
 
 @jit
 def eval_vs_allc(scan_carry, _):
