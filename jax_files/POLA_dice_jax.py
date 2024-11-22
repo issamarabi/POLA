@@ -934,40 +934,54 @@ def eval_vs_alld(scan_carry, _):
 @jit
 def eval_vs_allc(scan_carry, _):
     """
-    Single-step logic for evaluating one agent vs. 'ALLC' for the others.
+    Evaluate how self_agent_idx does vs 'always cooperate'.
     """
-    (key, p_states, v_states, env_state, obs, hidden_p, hidden_v, self_agent) = scan_carry
+    (key, p_states, v_states,
+     env_state, obs_batch,
+     hidden_p, hidden_v,
+     self_agent_idx) = scan_carry
 
-    # 1) Everyone calls 'act(...)'
-    act_carry = (key, obs, p_states, v_states, hidden_p, hidden_v)
-    _, aux = act(act_carry, None)
-    (actions, log_probs, values, hidden_p, hidden_v,
-     softmax_arr, logits_arr) = aux
+    key, subkey = jax.random.split(key)
+    # 1) All n agents "act" ...
+    scan_carry_act = (subkey, obs_batch, p_states, v_states, hidden_p, hidden_v)
+    scan_carry_act, aux_act = act(scan_carry_act, None)
+    (actions_arr, log_probs_arr, values_arr,
+     hidden_p, hidden_v, softmax_arr, logits_arr) = aux_act
 
-    # 2) Overwrite opponents with "cooperate" action
+    # 2) Override the other n-1 agents with 'cooperate'
     if args.env == "ipd":
-        fix_action_for_others = jnp.ones_like(actions[:, 0])  # 1 => Cooperate
-    elif args.env == "coin":
-        # For coin: get 'cooperative' moves
-        # shape [batch_size, n_agents]
-        all_coop_moves = env.get_coop_actions(env_state)
-        fix_action_for_others = all_coop_moves
+        # cooperate=1
+        def overwrite_ipd(a, i):
+            return jnp.where(i == self_agent_idx, a, 1)
+        agent_idxs = jnp.arange(actions_arr.shape[1])
+        actions_arr = jax.vmap(
+            lambda row: jax.vmap(overwrite_ipd, in_axes=(0,0))(row, agent_idxs)
+        )(actions_arr)
+    else:
+        # coin => "cooperative" is get_coop_actions
+        coop_moves = env.get_coop_actions(env_state)  # shape [batch_size, n_agents]
+        def overwrite_coin(a, c, i):
+            return jnp.where(i == self_agent_idx, a, c)
+        agent_idxs = jnp.arange(coop_moves.shape[1])
+        actions_arr = jax.vmap(
+            lambda row, coop_row: jax.vmap(overwrite_coin, in_axes=(0,0,0))(row, coop_row, agent_idxs)
+        )(actions_arr, coop_moves)
 
-    mask = jnp.arange(args.n_agents) == self_agent
-    new_actions = jnp.where(mask[None, :], actions, fix_action_for_others)
+    # 3) Environment step
+    env_subkeys = jax.random.split(key, args.batch_size)
+    env_state_next, obs_next, rewards, env_info = vec_env_step(env_state, actions_arr, env_subkeys)
 
-    # 3) Step environment
-    subkeys = jax.random.split(key, args.batch_size+1)
-    key = subkeys[0]
-    env_subkeys = subkeys[1:]
-    new_env_state, new_obs, rewards, _ = vec_env_step(env_state, new_actions, env_subkeys)
+    # 4) measure the self agent's reward
+    r_self = rewards[:, self_agent_idx].mean()
 
-    new_scan_carry = (
+    # 5) new carry
+    scan_carry_next = (
         key, p_states, v_states,
-        new_env_state, new_obs,
-        hidden_p, hidden_v, self_agent
+        env_state_next, obs_next,
+        hidden_p, hidden_v,
+        self_agent_idx
     )
-    return new_scan_carry, jnp.mean(rewards, axis=0)
+    return scan_carry_next, r_self
 
 @jit
 def eval_vs_tft(scan_carry, _, self_agent):
