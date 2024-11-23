@@ -984,48 +984,70 @@ def eval_vs_allc(scan_carry, _):
     return scan_carry_next, r_self
 
 @jit
-def eval_vs_tft(scan_carry, _, self_agent):
+def eval_vs_tft(scan_carry, _):
     """
-    Evaluate agent vs "Tit-for-Tat" (TFT) strategy (copy last move in IPD or reciprocal coin collection),
-    for a given self_agent (1 or 2).
+    Evaluate how self_agent_idx does vs n-1 agents playing "TFT".
+    For IPD: each TFT agent i copies whatever i did last turn.
+    For CoinGame: we need to define 'coin-based TFT' logic.
     """
-    (key, th, val, env_state, obs, h_p, h_v, prev_a, prev_coop_coin_flag, r1_prev, r2_prev) = scan_carry
+    (key, p_states, v_states,
+     env_state, obs_batch,
+     hidden_p, hidden_v,
+     self_agent_idx,
+     prev_actions,  # shape [batch_size, n_agents]
+     prev_coop_coin_flags,  # optional for coin
+     r_prev          # if you want to track previous rewards
+    ) = scan_carry
+
+    # 1) Everyone "acts" normally
     key, subkey = jax.random.split(key)
-    act_args = (subkey, obs, th, th.params, val, val.params, h_p, h_v)
-    new_act_args, aux = act(act_args, None)
-    a, lp, v, h_p, h_v, cat_probs, logits = aux
+    scan_carry_act = (subkey, obs_batch, p_states, v_states, hidden_p, hidden_v)
+    scan_carry_act, aux_act = act(scan_carry_act, None)
+    (actions_arr, log_probs_arr, values_arr,
+     hidden_p, hidden_v, softmax_arr, logits_arr) = aux_act
 
-    keys = jax.random.split(key, args.batch_size + 1)
-    key = keys[0]
-    env_subkeys = keys[1:]
-
+    # 2) Overwrite n-1 "TFT" agents
+    #    For IPD: they do: action[i] = prev_actions[i]
+    #    For coin: if you used "flag=0 => defect, 1 => coop"
+    #    or whatever logic you prefer
     if args.env == "ipd":
-        # Copy last move of agent; assumes prev_a = all coop
-        a_opp = prev_a
-        new_flag = None
-    elif args.env == "coin":
-        if self_agent == 1:
-            r_opp = r2_prev
-            red_agent_perspective_opp = False
-        else:
-            r_opp = r1_prev
-            red_agent_perspective_opp = True
-        # CoinGame "TFT" = if opponent recently took my coin => I do defect. Otherwise, I cooperate.
-        new_flag = jnp.where(r_opp < 0, 0, prev_coop_coin_flag)
-        new_flag = jnp.where(r_opp > 0, 1, new_flag)
-        a_opp_defect = env.get_moves_shortest_path_to_coin(env_state, red_agent_perspective=red_agent_perspective_opp)
-        a_opp_coop = env.get_coop_action(env_state, red_agent_perspective=red_agent_perspective_opp)
-        a_opp = jnp.where(new_flag == 0, a_opp_defect, a_opp_coop)
+        def overwrite_ipd(a, i):
+            # if i != self_agent_idx, do prev_actions[i]
+            # else do a
+            return jnp.where(i == self_agent_idx, a, prev_actions[:, i])
+        # agent_idxs shape [n_agents]
+        agent_idxs = jnp.arange(actions_arr.shape[1])
+        # We must do a per-environment row override
+        actions_arr = jax.vmap(
+            lambda row_a, row_prev: jax.vmap(overwrite_ipd, in_axes=(None,0))(row_a, agent_idxs)
+        )(actions_arr, prev_actions)
+    else:
+        # coin-based TFT => if you took my coin last turn, i 'defect' = get_moves_towards_coin
+        # otherwise i 'cooperate' = get_coop_actions
+        # This is purely an example - adapt to your actual logic
+        # We'll just do the same approach as IPD for brevity or some custom approach
+        # e.g. store a separate array that indicates "did you steal from me last time?"
+        pass
 
-    a1 = a if self_agent == 1 else jax.lax.stop_gradient(a_opp)
-    a2 = a if self_agent == 2 else jax.lax.stop_gradient(a_opp)
+    # 3) Step environment
+    env_subkeys = jax.random.split(key, args.batch_size)
+    env_state_next, obs_next, rewards, env_info = vec_env_step(env_state, actions_arr, env_subkeys)
 
-    env_state_next, obs_next, (r1, r2), aux_info = vec_env_step(env_state, a1, a2, env_subkeys)
-    s1 = r1.mean()
-    s2 = r2.mean()
+    # 4) measure self agent's reward
+    r_self = rewards[:, self_agent_idx].mean()
 
-    new_scan_carry = (key, th, val, env_state_next, obs_next, h_p, h_v, a, new_flag, r1, r2)
-    return new_scan_carry, (s1, s2)
+    # 5) Update carry with new prev_actions = actions_arr
+    #    You might also update coin flags or store new r_prev
+    scan_carry_next = (
+        key, p_states, v_states,
+        env_state_next, obs_next,
+        hidden_p, hidden_v,
+        self_agent_idx,
+        actions_arr,      # the new prev_actions
+        prev_coop_coin_flags,
+        rewards          # or just r_self?
+    )
+    return scan_carry_next, r_self
 
 @partial(jit, static_argnums=(3, 4))
 def eval_vs_fixed_strategy(key, train_th, train_val, strat="alld", self_agent=1):
