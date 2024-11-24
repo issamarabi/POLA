@@ -284,77 +284,73 @@ def act_w_iter_over_obs(scan_carry, env_batch_obs):
 @jit
 def env_step(scan_carry, _):
     """
-    N-agent version of a single environment step.
-    
-    scan_carry = (
-        key,
-        env_state,         # shape [batch_size, ...] environment internal state
-        obs,               # shape [batch_size, obs_dim], shared
-        p_states,          # list of length n_agents: each agent's policy TrainState
-        v_states,          # list of length n_agents: each agent's value TrainState (if baseline)
-        hidden_p,          # list of length n_agents: policy RNN states
-        hidden_v           # list of length n_agents: value RNN states
-    )
-
-    Returns: (new_scan_carry, (per_agent_info, env_aux))
-
-    - per_agent_info: a list (length n_agents), where each entry has the
-        (softmax_i, obs, logprob_i, value_i, reward_i, action_i) for agent i
-    - env_aux: any environment-specific auxiliary info (e.g. coin-match indicators)
+    Single environment step for n agents.
+    Each agent acts using its policy RNN (all in parallel).
+    Then the environment is stepped once.
     """
-    (key, env_state, obs, p_states, v_states, hidden_p, hidden_v) = scan_carry
+    (key, env_state, obs_batch,
+     trainstates_p, trainstates_v,
+     hidden_p, hidden_v) = scan_carry
 
-    # 1) Generate subkeys for the environment step
-    subkeys = jax.random.split(key, args.batch_size + 1)
-    key = subkeys[0]
-    env_subkeys = subkeys[1:]
+    # 1) Sample actions for all agents.
+    # ---------------------------------
+    key, subkey = jax.random.split(key)
+    scan_carry_act = (subkey, obs_batch, trainstates_p, trainstates_v, hidden_p, hidden_v)
+    scan_carry_act, aux_act = act(scan_carry_act, None)
+    (actions_arr, log_probs_arr, values_arr,
+     hidden_p, hidden_v, softmax_arr, logits_arr) = aux_act
 
-    # 2) All agents act simultaneously
-    act_carry = (key, obs, p_states, v_states, hidden_p, hidden_v)
-    _, aux_act = act(act_carry, None)
-    (
-        all_actions,       # [batch_size, n_agents]
-        all_log_probs,     # [batch_size, n_agents]
-        all_values,        # [batch_size, n_agents]
-        hidden_p,          # updated policy RNN states
-        hidden_v,          # updated value RNN states
-        softmax_arr,       # [batch_size, n_agents, action_dim]
-        logits_arr         # [batch_size, n_agents, action_dim]
-    ) = aux_act
+    # actions_arr:    [batch_size, n_agents]
+    # log_probs_arr:  [batch_size, n_agents]
+    # values_arr:     [batch_size, n_agents]
+    # softmax_arr:    [batch_size, n_agents, action_dim]
+    # logits_arr:     [batch_size, n_agents, action_dim]
 
-    # 3) Environment step with these N actions
-    new_env_state, new_obs, rewards, env_aux = vec_env_step(
-        env_state,
-        all_actions,      # shape [batch_size, n_agents]
-        env_subkeys       # shape [batch_size, ...]
+    # 2) Step environment
+    # --------------------
+    env_subkeys = jax.random.split(key, args.batch_size)
+    # Each row in actions_arr is the multi-agent action for that environment instance
+    env_state_next, obs_next, rewards, env_info = vec_env_step(env_state, actions_arr, env_subkeys)
+    # - env_state_next: updated environment states
+    # - obs_next: next observation(s), shape [batch_size, obs_dim]
+    # - rewards: shape [batch_size, n_agents]
+    # - env_info: auxiliary info from the environment
+
+    # 3) Build per-agent "aux" outputs
+    # --------------------------------
+    # Just like the 2-agent code built aux1, aux2, we can store
+    # a list or tuple of (cat_probs, obs, log_prob, value, reward, action, etc.) for each agent i.
+    # For convenience we can store everything in one big tuple, or an array of shape [n_agents, ...].
+    # Below we keep them stacked so that lax.scan returns an array we can later index for each agent.
+
+    # We'll store  for each agent i:
+    #   - softmax_arr[:, i, :]   (policy distribution)
+    #   - obs_next               (the next state, shared for all agents in fully observed tasks)
+    #   - log_probs_arr[:, i]
+    #   - values_arr[:, i]
+    #   - rewards[:, i]
+    #   - actions_arr[:, i]
+    #   - We also could store actions of other agents, if needed.
+
+    all_agents_aux = (
+        softmax_arr,          # shape [batch_size, n_agents, action_dim]
+        obs_next,             # shape [batch_size, obs_dim]
+        log_probs_arr,        # shape [batch_size, n_agents]
+        values_arr,           # shape [batch_size, n_agents]
+        rewards,              # shape [batch_size, n_agents]
+        actions_arr,          # shape [batch_size, n_agents]
+        logits_arr,           # shape [batch_size, n_agents, action_dim]
+        env_info              # any extra info from the environment
     )
-    # rewards => shape [batch_size, n_agents]
 
-    # 4) Build new scan carry
-    new_scan_carry = (
-        key,
-        new_env_state,    # updated env
-        new_obs,          # updated obs
-        p_states,
-        v_states,
-        hidden_p,
-        hidden_v
+    # 4) Update the scan_carry
+    # -------------------------
+    scan_carry_next = (
+        key, env_state_next, obs_next,
+        trainstates_p, trainstates_v,
+        hidden_p, hidden_v
     )
-
-    # 5) Build a "per_agent_info" structure: for each agent i, store relevant data
-    #    so we can compute losses or analyze afterwards.
-    per_agent_info = []
-    for i in range(args.n_agents):
-        per_agent_info.append((
-            softmax_arr[:, i, :],   # shape [batch_size, action_dim]
-            obs,                    # shape [batch_size, obs_dim], old obs
-            all_log_probs[:, i],    # shape [batch_size]
-            all_values[:, i],       # shape [batch_size]
-            rewards[:, i],          # shape [batch_size]
-            all_actions[:, i],      # shape [batch_size]
-        ))
-
-    return new_scan_carry, per_agent_info
+    return scan_carry_next, all_agents_aux
 
 
 ###############################################################################
