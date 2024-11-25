@@ -1045,59 +1045,50 @@ def eval_vs_tft(scan_carry, _):
     )
     return scan_carry_next, r_self
 
-@partial(jit, static_argnums=(3, 4))
-def eval_vs_fixed_strategy(key, train_th, train_val, strat="alld", self_agent=1):
+@partial(jit, static_argnums=(4,))
+def eval_vs_fixed_strategy(key, p_states, v_states, strat="alld", self_agent_idx=0):
     """
-    Evaluate a single agent's policy vs a fixed strategy:
-     - alld   => always defect
-     - allc   => always cooperate
-     - tft    => tit for tat
+    Evaluate agent 'self_agent_idx' vs. a fixed strategy (alld, allc, tft).
+    We run an episode of length 'args.rollout_len' in parallel across 'args.batch_size'.
     """
+    # 1) Reset environment
     keys = jax.random.split(key, args.batch_size + 1)
-    key, env_subkeys = keys[0], keys[1:]
-    
+
     # Assumes consistent observation structure after reset.
     # If observation structures differ, consider padding or conditional handling in subsequent steps.
-    env_state, obsv = vec_env_reset(env_subkeys)
-    
-    h_p = jnp.zeros((args.batch_size, args.hidden_size))
-    h_v = jnp.zeros((args.batch_size, args.hidden_size)) if use_baseline else None
+    env_state, obs_batch = vec_env_reset(keys[1:])
 
+    # 2) init hidden states
+    hidden_p = jnp.array([jnp.zeros((args.batch_size, args.hidden_size)) for _ in range(n_agents)])
+    hidden_v = jnp.array([jnp.zeros((args.batch_size, args.hidden_size)) if use_baseline else None for _ in range(n_agents)], dtype=object)
+
+    # 3) Build initial scan_carry
+    # For TFT, you might need extra fields in the carry, e.g. prev_actions.
+    # For alld/allc, we do not need them:
+    scan_carry = (
+        key, p_states, v_states,
+        env_state, obs_batch,
+        hidden_p, hidden_v,
+        self_agent_idx
+    )
+
+    # 4) choose sub-function
     if strat == "alld":
-        scan_carry = (key, train_th, train_val, env_state, obsv, h_p, h_v)
-        scan_carry, results = jax.lax.scan(eval_vs_alld, scan_carry, None, self_agent, args.rollout_len)
-    
+        scan_func = eval_vs_alld
     elif strat == "allc":
-        scan_carry = (key, train_th, train_val, env_state, obsv, h_p, h_v)
-        scan_carry, results = jax.lax.scan(eval_vs_allc, scan_carry, None, self_agent, args.rollout_len)
-    
+        scan_func = eval_vs_allc
     elif strat == "tft":
-        if args.env == "ipd":
-            prev_a = jnp.ones(args.batch_size, dtype=int)  # init => assume coop
-            r1_init = jnp.zeros(args.batch_size)
-            r2_init = jnp.zeros(args.batch_size)
-            flag_init = None
-    
-        elif args.env == "coin":
-            if self_agent == 1:
-                prev_a = env.get_coop_action(env_state, red_agent_perspective=False)
-            else:
-                prev_a = env.get_coop_action(env_state, red_agent_perspective=True)
-            flag_init = jnp.ones(args.batch_size, dtype=int)
-            r1_init = jnp.zeros(args.batch_size)
-            r2_init = jnp.zeros(args.batch_size)
-    
-        else:
-            raise NotImplementedError("Unknown environment for TFT evaluation")
-
-        scan_carry = (key, train_th, train_val, env_state, obsv, h_p, h_v,
-                      prev_a, flag_init, r1_init, r2_init)
-        scan_carry, results = jax.lax.scan(eval_vs_tft, scan_carry, None, self_agent, args.rollout_len)
+        # If you want a big carry, define it properly or create a separate “tft_carry” version.
+        raise NotImplementedError("eval_vs_tft not implemented.")
     else:
-        raise NotImplementedError("Unknown strategy for evaluation")
+        raise ValueError("Unknown fixed strategy requested.")
 
-    s1, s2 = results
-    return (s1.mean(), s2.mean()), None
+    # 5) run the scan
+    scan_carry, r_self_history = jax.lax.scan(scan_func, scan_carry,
+                                              None, length=args.rollout_len)
+    # r_self_history => shape [rollout_len,], each step's avg reward for self agent
+    r_self_mean = r_self_history.mean()
+    return r_self_mean
 
 
 ###############################################################################
