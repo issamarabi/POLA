@@ -445,14 +445,8 @@ def get_init_hidden_states():
     """
     Returns list of hidden states for each agent's policy (and value) RNN
     """
-    hidden_p = []
-    hidden_v = []
-    for _ in range(args.n_agents):
-        hidden_p.append(jnp.zeros((args.batch_size, args.hidden_size)))
-        if use_baseline:
-            hidden_v.append(jnp.zeros((args.batch_size, args.hidden_size)))
-        else:
-            hidden_v.append(None)
+    hidden_p = jnp.array([jnp.zeros((args.batch_size, args.hidden_size)) for _ in range(args.n_agents)])
+    hidden_v = jnp.array([jnp.zeros((args.batch_size, args.hidden_size)) if use_baseline else None for _ in range(args.n_agents)], dtype=object)
     return hidden_p, hidden_v
 
 
