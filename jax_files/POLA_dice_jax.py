@@ -558,28 +558,71 @@ def in_lookahead(key, th1, th1_params, val1, val1_params,
     return objective_inner + args.inner_beta * kl_term
 
 @jit
-def inner_step_get_grad_otheragent2(scan_carry, _):
+def inner_step_get_grad_otheragent(scan_carry, _, other_agent=1):
     """
-    Single update step for agent 2's inner lookahead objective.
+    Single update step for the "other_agent" inner lookahead objective.
+
+    Depending on `other_agent`, we:
+      - Compute gradient of in_lookahead with respect to that agent's
+        policy and value parameters,
+      - Update the corresponding TrainStates (SGD),
+      - Keep the other agent's parameters fixed.
+
+    Returns updated scan_carry with the newly updated parameters for the agent-of-interest.
     """
     (key, th1, th1_params, val1, val1_params,
      th2, th2_params, val2, val2_params,
      old_th, old_val) = scan_carry
 
     key, subkey = jax.random.split(key)
-    grad_fn = jax.grad(in_lookahead, argnums=[6, 8])
-    grad_th2, grad_v2 = grad_fn(subkey, th1, th1_params, val1, val1_params,
-                                th2, th2_params, val2, val2_params,
-                                old_th, old_val, other_agent=2)
-    # Update agent 2's policy parameters (SGD)
-    th2_updated = th2.apply_gradients(grads=grad_th2)
 
-    # Update agent 2's value parameters (SGD)
-    val2_updated = val2.apply_gradients(grads=grad_v2) if use_baseline else val2
+    if other_agent == 1:
+        # We differentiate w.r.t. agent 1’s policy (th1) and value (val1)
+        grad_fn = jax.grad(in_lookahead, argnums=[2, 4])
+        grad_th1, grad_v1 = grad_fn(
+            subkey,
+            th1, th1_params, val1, val1_params,
+            th2, th2_params, val2, val2_params,
+            old_th, old_val,
+            other_agent=1
+        )
+        # Update agent 1
+        th1_updated = th1.apply_gradients(grads=grad_th1)
+        val1_updated = val1.apply_gradients(grads=grad_v1) if use_baseline else val1
 
-    new_scan_carry = (key, th1, th1_params, val1, val1_params,
-                      th2_updated, th2_updated.params, val2_updated, val2_updated.params,
-                      old_th, old_val)
+        new_scan_carry = (
+            key,
+            th1_updated, th1_updated.params,
+            val1_updated, val1_updated.params,
+            th2, th2_params,
+            val2, val2_params,
+            old_th, old_val
+        )
+
+    else:
+        # other_agent == 2
+        # We differentiate w.r.t. agent 2’s policy (th2) and value (val2)
+        grad_fn = jax.grad(in_lookahead, argnums=[6, 8])
+        grad_th2, grad_v2 = grad_fn(
+            subkey,
+            th1, th1_params, val1, val1_params,
+            th2, th2_params, val2, val2_params,
+            old_th, old_val,
+            other_agent=2
+        )
+        # Update agent 2
+        th2_updated = th2.apply_gradients(grads=grad_th2)
+        val2_updated = val2.apply_gradients(grads=grad_v2) if use_baseline else val2
+
+        new_scan_carry = (
+            key,
+            th1, th1_params,
+            val1, val1_params,
+            th2_updated, th2_updated.params,
+            val2_updated, val2_updated.params,
+            old_th, old_val
+        )
+
     return new_scan_carry, None
 
 @jit
@@ -1518,8 +1561,7 @@ def play(key, init_th1, init_val1, init_th2, init_val2, use_opp_model=False):
 
     if args.opp_model:
         key, subkey = jax.random.split(key)
-        th, val = get_init_trainstates(subkey, 2, action_size, input_size)
-        agent1_om_th2, agent1_om_val2, agent2_om_th1, agent2_om_val1 = th[0], val[0], th[1], val[1]
+        agent1_om_th2, agent1_om_val2, agent2_om_th1, agent2_om_val1 = get_init_trainstates(subkey, action_size, input_size)
 
 
     # Evaluate initial performance
