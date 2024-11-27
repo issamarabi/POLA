@@ -1363,54 +1363,111 @@ def get_init_trainstates(key, n_agents, action_size_, input_size_):
 
 
 @jit
-def eval_progress(subkey, th1, val1, th2, val2):
+def eval_progress(subkey, p_states, v_states):
     """
-    Quick environment rollout (single pass) + evaluation vs fixed strategies 
-    for diagnostics/logging.
+    N-agent version of eval_progress.
+
+    1) Run a single episode rollout (args.rollout_len steps) in parallel across args.batch_size envs.
+    2) Compute the average rewards each agent received.
+    3) Evaluate each agent vs. 3 fixed strategies: ALLD, ALLC, TFT (if implemented).
+    4) Return average rewards and the [n_agents, 3] array of 'vs fixed strat' scores.
+
+    Args:
+      subkey: PRNG key for evaluation.
+      p_states: list of TrainStates (policy) for each agent.
+      v_states: list of TrainStates (value) for each agent (if using baselines).
+    Returns:
+      avg_rewards: jnp.ndarray of shape [n_agents],
+                   mean reward (over time & batch) of each agent’s policy in self-play.
+      coin_info: None or any environment-specific info parsed from env_info.
+      fixed_scores: jnp.ndarray of shape [n_agents, 3],
+                    where fixed_scores[i, :] are the agent i’s average reward vs (alld, allc, tft).
+                    (If TFT is not implemented, you can return dummy values or skip it.)
     """
+
+    # 1) Reset the environment for 'args.batch_size' parallel runs
     keys = jax.random.split(subkey, args.batch_size + 1)
-    key, env_subkeys = keys[0], keys[1:]
-    env_state, obsv = vec_env_reset(env_subkeys)
-    obs1 = obsv
-    obs2 = obsv
-    h_p1, h_p2, h_v1, h_v2 = get_init_hidden_states()
+    env_state, obs_batch = vec_env_reset(keys[1:])
+    
+    # 2) Initialize hidden states for each agent’s policy & value RNNs
+    hidden_p_list, hidden_v_list = get_init_hidden_states()
+    # For scan carry, we typically pack them into jnp arrays or keep them as lists if we like.
+    # One simple approach is to keep them as lists (PyTree) if your code permits.
+    # For brevity, below we’ll keep them as lists:
+    
+    init_scan_carry = (
+        keys[0],          # key for the scan
+        env_state,        # shape [batch_size, ...]
+        obs_batch,        # shape [batch_size, obs_dim]
+        p_states,         # list of policy TrainStates
+        v_states,         # list of value TrainStates
+        hidden_p_list,    # list of hidden states for policy RNN
+        hidden_v_list,    # list of hidden states for value RNN (or None if no_baseline)
+    )
+    
+    # 3) Roll out the environment with a single jax.lax.scan for args.rollout_len steps
+    final_scan_carry, all_agents_aux = jax.lax.scan(
+        env_step,         # the per-step function
+        init_scan_carry,
+        xs=None,
+        length=args.rollout_len
+    )
+    # all_agents_aux is a tuple-of-outputs at each step, shaped [rollout_len, ...].
+    # Recall from env_step we returned:
+    #   all_agents_aux = (
+    #       softmax_arr, obs_next, log_probs_arr, values_arr,
+    #       rewards, actions_arr, logits_arr, env_info
+    #   )
+    # so all_agents_aux[i] is the 8-tuple for step i. We can index them with all_agents_aux[index_in_that_tuple].
+    
+    # 4) Extract rewards: shape [rollout_len, batch_size, n_agents]
+    rewards_array = all_agents_aux[4]  # since it's the 5th item in that tuple
+    # Compute mean over (time, batch):
+    avg_rewards = rewards_array.mean(axis=(0, 1))  # shape [n_agents]
+    
+    # 5) Optionally parse env_info if you want environment-specific stats
+    # env_info = all_agents_aux[7], shape [rollout_len, batch_size, ...]
+    # For example, in coin game with N agents, you might store how many times each agent picks up a coin.
+    # If you do not need it, you can set it to None or keep it as raw data.
+    coin_info = None
+    # Example of partial retrieval:
+    #   env_info = all_agents_aux[7]  # shape [rollout_len, batch_size, ???]
+    #   # parse it if needed:
+    #   coin_info = ...
+    
+    # 6) Evaluate each agent vs fixed strats: (alld, allc, tft)
+    key_after_rollout = final_scan_carry[0]  # re-use the final key from the scan
+    # We build a list, each element is shape [3], then stack => shape [n_agents, 3]
 
-    init_scan_carry = (key, env_state, obs1, obs2,
-                       th1, th1.params, val1, val1.params,
-                       th2, th2.params, val2, val2.params,
-                       h_p1, h_v1, h_p2, h_v2)
-    final_scan_carry, (aux1, aux2, aux_info) = jax.lax.scan(env_step, init_scan_carry, None, args.rollout_len)
-
-    (cat_probs1, obs_out1, lp1, lp2, v1, r1, a1, a2) = aux1
-    (cat_probs2, obs_out2, lp2b, lp1b, v2, r2, a2b, a1b) = aux2
-    avg_r1 = r1.mean()
-    avg_r2 = r2.mean()
-
-    rr_matches_amount = None
-    rb_matches_amount = None
-    br_matches_amount = None
-    bb_matches_amount = None
-
-    if args.env == 'coin':
-        (rr_matches, rb_matches, br_matches, bb_matches) = aux_info
-        rr_matches_amount = rr_matches.sum(axis=0).mean()
-        rb_matches_amount = rb_matches.sum(axis=0).mean()
-        br_matches_amount = br_matches.sum(axis=0).mean()
-        bb_matches_amount = bb_matches.sum(axis=0).mean()
-
-    # Evaluate vs fixed strats
-    score1rec = []
-    score2rec = []
-    for strat in ["alld", "allc", "tft"]:
-        key, subkey = jax.random.split(key)
-        sc1, _ = eval_vs_fixed_strategy(subkey, th1, val1, strat, self_agent=1)
-        score1rec.append(sc1[0])
-
-        key, subkey = jax.random.split(key)
-        sc2, _ = eval_vs_fixed_strategy(subkey, th2, val2, strat, self_agent=2)
-        score2rec.append(sc2[1])
-
-    return avg_r1, avg_r2, rr_matches_amount, rb_matches_amount, br_matches_amount, bb_matches_amount, jnp.stack(score1rec), jnp.stack(score2rec)
+    def single_agent_eval(agent_idx, key_eval):
+        """Helper that returns [3] = (score vs alld, score vs allc, score vs tft)."""
+        scores = []
+        # strategies in a known order
+        for strat in ["alld", "allc", "tft"]:
+            key_eval, subkey_eval = jax.random.split(key_eval)
+            # eval_vs_fixed_strategy returns a single float (r_self_mean)
+            r_self_mean = eval_vs_fixed_strategy(
+                subkey_eval,
+                p_states,     # entire list of policies
+                v_states,     # entire list of value states
+                strat=strat,
+                self_agent_idx=agent_idx
+            )
+            scores.append(r_self_mean)
+        return jnp.stack(scores), key_eval
+    
+    # We'll fold over each agent:
+    def agent_loop(key_in, agent_i):
+        key_in, subkey_in = jax.random.split(key_in)
+        agent_scores, key_out = single_agent_eval(agent_i, subkey_in)
+        return key_out, agent_scores
+    
+    # Run a scan over agent_i=0..(n_agents-1):
+    final_key, fixed_scores = jax.lax.scan(agent_loop, key_after_rollout, jnp.arange(args.n_agents))
+    # fixed_scores_raw is shape [n_agents, 3]
+    
+    # 7) Return our results
+    return avg_rewards, fixed_scores, coin_info
 
 
 def inspect_ipd(trainstates_p, trainstates_val):
