@@ -626,78 +626,123 @@ def inner_step_get_grad_otheragent(scan_carry, _, other_agent=1):
     return new_scan_carry, None
 
 @jit
-def inner_steps_plus_update_otheragent2(key, th1, th1_params, val1, val1_params,
-                                        th2, th2_params, val2, val2_params,
-                                        old_th2, old_val2):
+def inner_steps_plus_update_otheragent(
+    key, th1, th1_params, val1, val1_params,
+    th2, th2_params, val2, val2_params,
+    old_th, old_val,
+    other_agent=1
+):
     """
-    Runs args.inner_steps of agent 2's inner loop updates, returning updated (th2, val2).
+    Runs `args.inner_steps` of inner-loop updates for the specified `other_agent`.
+    Returns the updated (th, val) TrainStates for that agent. The other agent's
+    parameters remain fixed during these inner updates.
+
+    If other_agent=1:
+      - We create "th1_prime" and "val1_prime" for agent 1, then run inner steps
+        that update only agent 1's parameters. Agent 2's are held fixed.
+    If other_agent=2:
+      - We create "th2_prime" and "val2_prime" for agent 2, then run inner steps
+        that update only agent 2's parameters. Agent 1's are held fixed.
     """
-    th2_prime = TrainState.create(apply_fn=th2.apply_fn, params=th2_params,
-                                  tx=optax.sgd(learning_rate=args.lr_in))
-    val2_prime = None
-    if use_baseline:
-        val2_prime = TrainState.create(apply_fn=val2.apply_fn, params=val2_params,
-                                       tx=optax.sgd(learning_rate=args.lr_v))
+    if other_agent == 1:
+        # Create a fresh TrainState for agent 1
+        th_prime = TrainState.create(
+            apply_fn=th1.apply_fn,
+            params=th1_params,
+            tx=optax.sgd(learning_rate=args.lr_in)
+        )
+        val_prime = (TrainState.create(
+            apply_fn=val1.apply_fn,
+            params=val1_params,
+            tx=optax.sgd(learning_rate=args.lr_v))
+            if use_baseline else val1
+        )
+
+        # Prepare the initial carry
+        carry_init = (
+            key,
+            th_prime, th_prime.params,
+            val_prime, val_prime.params,
+            th2, th2_params,
+            val2, val2_params,
+            old_th, old_val
+        )
+
+        # Perform the first inner step
+        carry_after, _ = inner_step_get_grad_otheragent(carry_init, None, other_agent=1)
+        (key_after,
+         th_prime, th_prime_params,
+         val_prime, val_prime_params,
+         _, _, _, _, _, _) = carry_after
+
+        # Additional inner steps (if args.inner_steps > 1)
+        if args.inner_steps > 1:
+            carry_loop = (
+                key_after,
+                th_prime, th_prime.params,
+                val_prime, val_prime.params,
+                th2, th2_params,
+                val2, val2_params,
+                old_th, old_val
+            )
+            carry_loop, _ = jax.lax.scan(
+                lambda c, _: inner_step_get_grad_otheragent(c, None, other_agent=1),
+                carry_loop,
+                None,
+                args.inner_steps - 1
+            )
+
     else:
-        val2_prime = val2
+        # other_agent == 2
+        # Create a fresh TrainState for agent 2
+        th_prime = TrainState.create(
+            apply_fn=th2.apply_fn,
+            params=th2_params,
+            tx=optax.sgd(learning_rate=args.lr_in)
+        )
+        val_prime = (TrainState.create(
+            apply_fn=val2.apply_fn,
+            params=val2_params,
+            tx=optax.sgd(learning_rate=args.lr_v))
+            if use_baseline else val2
+        )
 
-    # Save parameters of agent 1's network for differentiation in the outer loop.
-    carry_init = (key, th1, th1_params, val1, val1_params,
-                  th2_prime, th2_prime.params, val2_prime, val2_prime.params,
-                  old_th2, old_val2)
+        carry_init = (
+            key,
+            th1, th1_params,
+            val1, val1_params,
+            th_prime, th_prime.params,
+            val_prime, val_prime.params,
+            old_th, old_val
+        )
 
-    carry_after, _ = inner_step_get_grad_otheragent2(carry_init, None)
-    (key_after, th1_, th1_params_, val1_, val1_params_,
-     th2_prime, th2_prime_params, val2_prime, val2_prime_params,
-     _, _) = carry_after
+        # Perform the first inner step
+        carry_after, _ = inner_step_get_grad_otheragent(carry_init, None, other_agent=2)
+        (key_after,
+         _, _, _, _,
+         th_prime, th_prime_params,
+         val_prime, val_prime_params,
+         _, _) = carry_after
 
-    if args.inner_steps > 1:
-        carry_loop = (key_after, th1_, th1_params_, val1_, val1_params_,
-                      th2_prime, th2_prime.params, val2_prime, val2_prime.params,
-                      old_th2, old_val2)
-        # Each step in the scan updates agent 2's policy and value network parameters using SGD.
-        # Gradients are calculated based on the parameters from the previous iteration.
-        carry_loop, _ = jax.lax.scan(inner_step_get_grad_otheragent2, carry_loop,
-                                     None, args.inner_steps - 1)
-        (_, _, _, _, _, th2_prime, th2_prime_params, val2_prime,
-         val2_prime_params, _, _) = carry_loop
+        # Additional inner steps (if args.inner_steps > 1)
+        if args.inner_steps > 1:
+            carry_loop = (
+                key_after,
+                th1, th1_params,
+                val1, val1_params,
+                th_prime, th_prime.params,
+                val_prime, val_prime.params,
+                old_th, old_val
+            )
+            carry_loop, _ = jax.lax.scan(
+                lambda c, _: inner_step_get_grad_otheragent(c, None, other_agent=2),
+                carry_loop,
+                None,
+                args.inner_steps - 1
+            )
+            (_, _, _, _, th_prime, _, val_prime, _, _, _) = carry_loop
 
-    return th2_prime, val2_prime
-
-@jit
-def inner_steps_plus_update_otheragent1(key, th1, th1_params, val1, val1_params,
-                                        th2, th2_params, val2, val2_params,
-                                        old_th1, old_val1):
-    """
-    Runs args.inner_steps of agent 1's inner loop updates, returning updated (th1, val1).
-    """
-    th1_prime = TrainState.create(apply_fn=th1.apply_fn, params=th1_params,
-                                  tx=optax.sgd(learning_rate=args.lr_in))
-    val1_prime = None
-    if use_baseline:
-        val1_prime = TrainState.create(apply_fn=val1.apply_fn, params=val1_params,
-                                       tx=optax.sgd(learning_rate=args.lr_v))
-    else:
-        val1_prime = val1
-
-    # Save parameters of agent 2's networks for differentiation in the outer loop.
-    carry_init = (key, th1_prime, th1_prime.params,
-                  val1_prime, val1_prime.params,
-                  th2, th2_params, val2, val2_params, old_th1, old_val1)
-    carry_after, _ = inner_step_get_grad_otheragent1(carry_init, None)
-    (_, th1_prime, _, val1_prime, _, _, _, _, _, _, _) = carry_after
-
-    if args.inner_steps > 1:
-        carry_loop = (carry_after[0], th1_prime, th1_prime.params,
-                      val1_prime, val1_prime.params,
-                      th2, th2_params, val2, val2_params, old_th1, old_val1)
-        # Each step in the scan updates agent 1's policy and value network parameters using SGD.
-        # Gradients are calculated based on the parameters from the previous iteration.
-        carry_loop, _ = jax.lax.scan(inner_step_get_grad_otheragent1, carry_loop,
-                                     None, args.inner_steps - 1)
-        (_, th1_prime, _, val1_prime, _, _, _, _, _, _, _) = carry_loop
-
-    return th1_prime, val1_prime
+    return th_prime, val_prime
 
 
 ###############################################################################
