@@ -626,32 +626,6 @@ def inner_step_get_grad_otheragent(scan_carry, _, other_agent=1):
     return new_scan_carry, None
 
 @jit
-def inner_step_get_grad_otheragent1(scan_carry, _):
-    """
-    Single update step for agent 1's inner lookahead objective.
-    """
-    (key, th1, th1_params, val1, val1_params,
-     th2, th2_params, val2, val2_params,
-     old_th, old_val) = scan_carry
-
-    key, subkey = jax.random.split(key)
-    grad_fn = jax.grad(in_lookahead, argnums=[2, 4])
-    grad_th1, grad_v1 = grad_fn(subkey, th1, th1_params, val1, val1_params,
-                                th2, th2_params, val2, val2_params,
-                                old_th, old_val, other_agent=1)
-    # Update agent 1's policy parameters (SGD)
-    th1_updated = th1.apply_gradients(grads=grad_th1)
-
-    # Update agent 1's value parameters (SGD)
-    val1_updated = val1.apply_gradients(grads=grad_v1) if use_baseline else val1
-
-    new_scan_carry = (key, th1_updated, th1_updated.params,
-                      val1_updated, val1_updated.params,
-                      th2, th2_params, val2, val2_params,
-                      old_th, old_val)
-    return new_scan_carry, None
-
-@jit
 def inner_steps_plus_update_otheragent2(key, th1, th1_params, val1, val1_params,
                                         th2, th2_params, val2, val2_params,
                                         old_th2, old_val2):
