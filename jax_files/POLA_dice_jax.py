@@ -800,71 +800,100 @@ def out_lookahead(key, th1, th1_params, val1, val1_params,
     return objective + args.outer_beta * kl_div_term, partial_state_hist
 
 @jit
-def one_outer_step_objective_selfagent1(
-    key, th1_copy, th1_copy_params, val1_copy, val1_copy_params,
-    th2_copy, th2_copy_params, val2_copy, val2_copy_params,
-    th_ref, val_ref
+def one_outer_step_objective_selfagent(
+    key,
+    th1_copy, th1_copy_params,
+    val1_copy, val1_copy_params,
+    th2_copy, th2_copy_params,
+    val2_copy, val2_copy_params,
+    th_ref, val_ref,
+    self_agent=1
 ):
     """
-    Single outer-step objective for agent 1: 
-    (1) run the inner step for agent 2, 
-    (2) evaluate final objective for agent 1's vantage point.
-    """
-    # 1) Inner step: agent 2 updates
-    key, subkey = jax.random.split(key)
-    th2_after_inner, val2_after_inner = inner_steps_plus_update_otheragent2(
-        subkey, th1_copy, th1_copy_params, val1_copy, val1_copy_params,
-        th2_copy, th2_copy_params, val2_copy, val2_copy_params,
-        th2_copy, val2_copy
-    )
-    # 2) Evaluate agent 1's objective
-    if use_baseline:
-        objective, state_hist = out_lookahead(
-            key, th1_copy, th1_copy_params, val1_copy, val1_copy_params,
-            th2_after_inner, th2_after_inner.params,
-            val2_after_inner, val2_after_inner.params,
-            th_ref, val_ref, self_agent=1
-        )
-    else:
-        objective, state_hist = out_lookahead(
-            key, th1_copy, th1_copy_params, None, None,
-            th2_after_inner, th2_after_inner.params, None, None,
-            th_ref, val_ref, self_agent=1
-        )
-    return objective, state_hist
+    Single outer-step objective for the specified `self_agent`.
 
-@jit
-def one_outer_step_objective_selfagent2(
-    key, th1_copy, th1_copy_params, val1_copy, val1_copy_params,
-    th2_copy, th2_copy_params, val2_copy, val2_copy_params,
-    th_ref, val_ref
-):
+    Steps:
+      1) Run the inner step(s) for the *other* agent (the opponent).
+      2) Evaluate the final objective from the perspective of `self_agent`.
+
+    If self_agent=1:
+      - Opponent is agent 2. We run inner_steps_plus_update_otheragent(... other_agent=2 ...),
+        then compute out_lookahead(... self_agent=1 ...).
+    If self_agent=2:
+      - Opponent is agent 1. We run inner_steps_plus_update_otheragent(... other_agent=1 ...),
+        then compute out_lookahead(... self_agent=2 ...).
+
+    Returns (objective, state_hist).
     """
-    Single outer-step objective for agent 2: 
-    (1) run the inner step for agent 1,
-    (2) evaluate final objective for agent 2's vantage point.
-    """
-    # 1) Inner step: agent 1 updates
-    key, subkey = jax.random.split(key)
-    th1_after_inner, val1_after_inner = inner_steps_plus_update_otheragent1(
-        subkey, th1_copy, th1_copy_params, val1_copy, val1_copy_params,
-        th2_copy, th2_copy_params, val2_copy, val2_copy_params,
-        th1_copy, val1_copy
-    )
-    # 2) Evaluate agent 2's objective
-    if use_baseline:
-        objective, state_hist = out_lookahead(
-            key, th1_after_inner, th1_after_inner.params,
-            val1_after_inner, val1_after_inner.params,
-            th2_copy, th2_copy_params, val2_copy, val2_copy_params,
-            th_ref, val_ref, self_agent=2
+    if self_agent == 1:
+        # 1) Inner step for agent 2
+        key, subkey = jax.random.split(key)
+        th2_after_inner, val2_after_inner = inner_steps_plus_update_otheragent(
+            subkey,
+            th1_copy, th1_copy_params,
+            val1_copy, val1_copy_params,
+            th2_copy, th2_copy_params,
+            val2_copy, val2_copy_params,
+            th2_copy, val2_copy,
+            other_agent=2
         )
+        # 2) Evaluate agent 1's vantage point
+        if use_baseline:
+            objective, state_hist = out_lookahead(
+                key,
+                th1_copy, th1_copy_params,
+                val1_copy, val1_copy_params,
+                th2_after_inner, th2_after_inner.params,
+                val2_after_inner, val2_after_inner.params,
+                th_ref, val_ref,
+                self_agent=1
+            )
+        else:
+            objective, state_hist = out_lookahead(
+                key,
+                th1_copy, th1_copy_params,
+                None, None,
+                th2_after_inner, th2_after_inner.params,
+                None, None,
+                th_ref, val_ref,
+                self_agent=1
+            )
+
     else:
-        objective, state_hist = out_lookahead(
-            key, th1_after_inner, th1_after_inner.params, None, None,
-            th2_copy, th2_copy_params, None, None,
-            th_ref, val_ref, self_agent=2
+        # self_agent == 2
+        # 1) Inner step for agent 1
+        key, subkey = jax.random.split(key)
+        th1_after_inner, val1_after_inner = inner_steps_plus_update_otheragent(
+            subkey,
+            th1_copy, th1_copy_params,
+            val1_copy, val1_copy_params,
+            th2_copy, th2_copy_params,
+            val2_copy, val2_copy_params,
+            th1_copy, val1_copy,
+            other_agent=1
         )
+        # 2) Evaluate agent 2's vantage point
+        if use_baseline:
+            objective, state_hist = out_lookahead(
+                key,
+                th1_after_inner, th1_after_inner.params,
+                val1_after_inner, val1_after_inner.params,
+                th2_copy, th2_copy_params,
+                val2_copy, val2_copy_params,
+                th_ref, val_ref,
+                self_agent=2
+            )
+        else:
+            objective, state_hist = out_lookahead(
+                key,
+                th1_after_inner, th1_after_inner.params,
+                None, None,
+                th2_copy, th2_copy_params,
+                None, None,
+                th_ref, val_ref,
+                self_agent=2
+            )
+
     return objective, state_hist
 
 
