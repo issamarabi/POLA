@@ -902,52 +902,67 @@ def one_outer_step_objective_selfagent(
 ###############################################################################
 
 @jit
-def one_outer_step_update_selfagent1(scan_carry, _):
+def one_outer_step_update_selfagent(scan_carry, _, self_agent=1):
     """
-    For agent 1's outer step update: 
-    1) compute gradient of the objective wrt. agent 1's params,
-    2) apply the gradient step,
-    3) return updated agent 1 trainstates.
-    """
-    (key, th1_copy, val1_copy, th2_copy, val2_copy, th_ref, val_ref) = scan_carry
-    key, subkey = jax.random.split(key)
+    For one outer-step update of the specified `self_agent`:
+      1) Compute gradient wrt that agent's policy/value,
+      2) Apply the gradient,
+      3) Return updated TrainStates for that agent.
 
-    grad_fn = jax.grad(one_outer_step_objective_selfagent1, argnums=[2, 4], has_aux=True)
-    (grad_th, grad_val), state_hist = grad_fn(
-        subkey, th1_copy, th1_copy.params, val1_copy, val1_copy.params,
-        th2_copy, th2_copy.params, val2_copy, val2_copy.params, th_ref, val_ref
-    )
-    th1_copy_updated = th1_copy.apply_gradients(grads=grad_th)
-    val1_copy_updated = val1_copy.apply_gradients(grads=grad_val) if use_baseline else val1_copy
+    We use one_outer_step_objective_selfagent(... self_agent=...) inside.
 
-    # Only final trainstate returned; no need for aux data.
-    updated_scan_carry = (
-        key, th1_copy_updated, val1_copy_updated, th2_copy, val2_copy, th_ref, val_ref
-    )
-    return updated_scan_carry, state_hist
-
-@jit
-def one_outer_step_update_selfagent2(scan_carry, _):
-    """
-    For agent 2's outer step update. 
-    1) compute gradient wrt. agent 2's params,
-    2) apply step,
-    3) return updated trainstates for agent 2.
+    Returns updated_scan_carry and state_hist.
     """
     (key, th1_copy, val1_copy, th2_copy, val2_copy, th_ref, val_ref) = scan_carry
     key, subkey = jax.random.split(key)
 
-    grad_fn = jax.grad(one_outer_step_objective_selfagent2, argnums=[6, 8], has_aux=True)
-    (grad_th, grad_val), state_hist = grad_fn(
-        subkey, th1_copy, th1_copy.params, val1_copy, val1_copy.params,
-        th2_copy, th2_copy.params, val2_copy, val2_copy.params, th_ref, val_ref
-    )
-    th2_copy_updated = th2_copy.apply_gradients(grads=grad_th)
-    val2_copy_updated = val2_copy.apply_gradients(grads=grad_val) if use_baseline else val2_copy
+    if self_agent == 1:
+        # Grad wrt agent 1's policy and value => argnums=[2,4]
+        grad_fn = jax.grad(one_outer_step_objective_selfagent, argnums=[2, 4], has_aux=True)
+        (grad_th, grad_val), state_hist = grad_fn(
+            subkey,
+            th1_copy, th1_copy.params,
+            val1_copy, val1_copy.params,
+            th2_copy, th2_copy.params,
+            val2_copy, val2_copy.params,
+            th_ref, val_ref,
+            self_agent=1
+        )
+        th_copy_updated = th1_copy.apply_gradients(grads=grad_th)
+        val_copy_updated = (val1_copy.apply_gradients(grads=grad_val)
+                            if use_baseline else val1_copy)
 
-    updated_scan_carry = (
-        key, th1_copy, val1_copy, th2_copy_updated, val2_copy_updated, th_ref, val_ref
-    )
+        updated_scan_carry = (
+            key,
+            th_copy_updated, val_copy_updated,
+            th2_copy, val2_copy,
+            th_ref, val_ref
+        )
+
+    else:
+        # self_agent == 2
+        # Grad wrt agent 2's policy and value => argnums=[6,8]
+        grad_fn = jax.grad(one_outer_step_objective_selfagent, argnums=[6, 8], has_aux=True)
+        (grad_th, grad_val), state_hist = grad_fn(
+            subkey,
+            th1_copy, th1_copy.params,
+            val1_copy, val1_copy.params,
+            th2_copy, th2_copy.params,
+            val2_copy, val2_copy.params,
+            th_ref, val_ref,
+            self_agent=2
+        )
+        th_copy_updated = th2_copy.apply_gradients(grads=grad_th)
+        val_copy_updated = (val2_copy.apply_gradients(grads=grad_val)
+                            if use_baseline else val2_copy)
+
+        updated_scan_carry = (
+            key,
+            th1_copy, val1_copy,
+            th_copy_updated, val_copy_updated,
+            th_ref, val_ref
+        )
+
     return updated_scan_carry, state_hist
 
 
