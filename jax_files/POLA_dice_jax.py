@@ -622,66 +622,70 @@ def inner_step_get_grad_otheragent(scan_carry, _):
 @jit
 def inner_steps_plus_update_otheragent(
     key,
-    th1, val1,
-    th2, val2,
+    th1, th1_params,
+    val1, val1_params,
+    th2, th2_params,
+    val2, val2_params,
     old_th, old_val,
     other_agent=1
 ):
     """
-    Runs `args.inner_steps` of inner updates for the specified `other_agent`,
-    returning the newly updated (policy, value) for that agent while
-    leaving the other agent's parameters fixed.
+    Runs args.inner_steps of inner-loop updates for 'other_agent'.
+    Returns updated (th, val) for the agent we are updating.
 
-    We:
-      1) "prime" the agent-of-interest (re-initialize its TrainState with SGD optimizer),
-      2) place everything in a single carry tuple (including `other_agent`),
-      3) run `jax.lax.scan(inner_step_get_grad_otheragent, ...)` for `args.inner_steps`,
-      4) extract the final updated train states for that agent from the final carry.
+    If other_agent == 1:
+      - We create a fresh TrainState for agent 1 (th1, val1) and update it.
+      - Agent 2's parameters remain fixed during these inner updates.
+    If other_agent == 2:
+      - We create a fresh TrainState for agent 2 (th2, val2) and update it.
+      - Agent 1 remains fixed.
     """
-    # 1) Decide which agent’s policy & value we “prime”
+
+    # 1) Create TrainState "prime" for the agent to be updated
     if other_agent == 1:
         th_prime = TrainState.create(
             apply_fn=th1.apply_fn,
-            params=th1.params,
+            params=th1_params,
             tx=optax.sgd(learning_rate=args.lr_in)
         )
-        val_prime = (
-            TrainState.create(
-                apply_fn=val1.apply_fn,
-                params=val1.params,
-                tx=optax.sgd(learning_rate=args.lr_v)
-            )
+        val_prime = (TrainState.create(
+            apply_fn=val1.apply_fn,
+            params=val1_params,
+            tx=optax.sgd(learning_rate=args.lr_v))
             if use_baseline else val1
         )
-        # 2) Construct the initial carry with agent-1 in prime
+
+        # 2) Build initial carry
         carry_init = (
             key,
-            th_prime, val_prime,  # agent-1's updated states
-            th2, val2,            # agent-2's unchanged states
-            old_th, old_val,
-            1  # other_agent
+            th_prime, th_prime.params,
+            val_prime, val_prime.params,
+            th2, th2_params,
+            val2, val2_params,
+            old_th, old_val
         )
+
     else:
         # other_agent == 2
         th_prime = TrainState.create(
             apply_fn=th2.apply_fn,
-            params=th2.params,
+            params=th2_params,
             tx=optax.sgd(learning_rate=args.lr_in)
         )
-        val_prime = (
-            TrainState.create(
-                apply_fn=val2.apply_fn,
-                params=val2.params,
-                tx=optax.sgd(learning_rate=args.lr_v)
-            )
+        val_prime = (TrainState.create(
+            apply_fn=val2.apply_fn,
+            params=val2_params,
+            tx=optax.sgd(learning_rate=args.lr_v))
             if use_baseline else val2
         )
+
         carry_init = (
             key,
-            th1, val1,           # agent-1's unchanged states
-            th_prime, val_prime, # agent-2's updated states
-            old_th, old_val,
-            2  # other_agent
+            th1, th1_params,
+            val1, val1_params,
+            th_prime, th_prime.params,
+            val_prime, val_prime.params,
+            old_th, old_val
         )
 
     # 3) Run `args.inner_steps` of updates via a single scan
@@ -694,11 +698,10 @@ def inner_steps_plus_update_otheragent(
 
     # 4) Extract final updated policy/value for the agent-of-interest
     if other_agent == 1:
-        (_, th1_f, val1_f, _, _, _, _, _) = final_carry
-        return th1_f, val1_f
+        (_, th_f, val_f, _, _, _, _, _) = final_carry
     else:
-        (_, _, _, th2_f, val2_f, _, _, _) = final_carry
-        return th2_f, val2_f
+        (_, _, _, th_f, val_f, _, _, _) = final_carry
+    return th_f, val_f
 
 ###############################################################################
 #    Outer-Loop Minimization for the "Self" Agent (POLA Outer Step)           #
