@@ -560,57 +560,59 @@ def in_lookahead(key, th1, th1_params, val1, val1_params,
 @jit
 def inner_step_get_grad_otheragent(scan_carry, _):
     """
-    Single update step for the 'other_agent' in the inner lookahead.
+    Single update step for the 'other_agent' in the inner lookahead objective.
+    - We differentiate and update only that agent's policy/value params.
+    - The other agent's params stay fixed.
 
-    scan_carry = (
-      key,
-      th1, val1,
-      th2, val2,
-      old_th, old_val,
-      other_agent
-    )
-
-    Steps:
-      - call in_lookahead(..., other_agent) to get the gradient wrt that agent's
-        (policy, value) parameters,
-      - apply an SGD update to those parameters,
-      - return the updated scan_carry.
+    scan_carry is a tuple:
+      (key, th1, th1_params, val1, val1_params,
+       th2, th2_params, val2, val2_params,
+       old_th, old_val, other_agent)
     """
-    (key, th1, val1, th2, val2, old_th, old_val, other_agent) = scan_carry
-    key, subkey = jax.random.split(key)
+    (key, th1, th1_params, val1, val1_params,
+     th2, th2_params, val2, val2_params,
+     old_th, old_val, other_agent) = scan_carry
 
-    # Agent 1 => argnums=[2, 4]; Agent 2 => argnums=[6, 8]
+    # Decide which arguments we differentiate wrt
+    # agent 1 => argnums = [2,4]; agent 2 => argnums = [6,8]
     argnums = [2, 4] if other_agent == 1 else [6, 8]
     grad_fn = jax.grad(in_lookahead, argnums=argnums)
+
+    key, subkey = jax.random.split(key)
     grad_th, grad_val = grad_fn(
         subkey,
-        th1, th1.params,
-        val1, val1.params,
-        th2, th2.params,
-        val2, val2.params,
+        th1, th1_params,
+        val1, val1_params,
+        th2, th2_params,
+        val2, val2_params,
         old_th, old_val,
         other_agent=other_agent
     )
 
     if other_agent == 1:
-        # Update agent-1's parameters
         th1_updated = th1.apply_gradients(grads=grad_th)
         val1_updated = val1.apply_gradients(grads=grad_val) if use_baseline else val1
+
         new_scan_carry = (
             key,
-            th1_updated, val1_updated,  # updated
-            th2, val2,                 # unchanged
+            th1_updated, th1_updated.params,
+            val1_updated, val1_updated.params,
+            th2, th2_params,
+            val2, val2_params,
             old_th, old_val,
             other_agent
         )
     else:
-        # Update agent-2's parameters
+        # other_agent == 2
         th2_updated = th2.apply_gradients(grads=grad_th)
         val2_updated = val2.apply_gradients(grads=grad_val) if use_baseline else val2
+
         new_scan_carry = (
             key,
-            th1, val1,                 # unchanged
-            th2_updated, val2_updated, # updated
+            th1, th1_params,
+            val1, val1_params,
+            th2_updated, th2_updated.params,
+            val2_updated, val2_updated.params,
             old_th, old_val,
             other_agent
         )
