@@ -558,192 +558,154 @@ def in_lookahead(key, th1, th1_params, val1, val1_params,
     return objective_inner + args.inner_beta * kl_term
 
 @jit
-def inner_step_get_grad_otheragent(scan_carry, _, other_agent=1):
+def inner_step_get_grad_otheragent(scan_carry, _):
     """
-    Single update step for the "other_agent" inner lookahead objective.
+    Single update step for the 'other_agent' in the inner lookahead.
 
-    Depending on `other_agent`, we:
-      - Compute gradient of in_lookahead with respect to that agent's
-        policy and value parameters,
-      - Update the corresponding TrainStates (SGD),
-      - Keep the other agent's parameters fixed.
+    scan_carry = (
+      key,
+      th1, val1,
+      th2, val2,
+      old_th, old_val,
+      other_agent
+    )
 
-    Returns updated scan_carry with the newly updated parameters for the agent-of-interest.
+    Steps:
+      - call in_lookahead(..., other_agent) to get the gradient wrt that agent's
+        (policy, value) parameters,
+      - apply an SGD update to those parameters,
+      - return the updated scan_carry.
     """
-    (key, th1, th1_params, val1, val1_params,
-     th2, th2_params, val2, val2_params,
-     old_th, old_val) = scan_carry
-
+    (key, th1, val1, th2, val2, old_th, old_val, other_agent) = scan_carry
     key, subkey = jax.random.split(key)
 
+    # Agent 1 => argnums=[2, 4]; Agent 2 => argnums=[6, 8]
+    argnums = [2, 4] if other_agent == 1 else [6, 8]
+    grad_fn = jax.grad(in_lookahead, argnums=argnums)
+    grad_th, grad_val = grad_fn(
+        subkey,
+        th1, th1.params,
+        val1, val1.params,
+        th2, th2.params,
+        val2, val2.params,
+        old_th, old_val,
+        other_agent=other_agent
+    )
+
     if other_agent == 1:
-        # We differentiate w.r.t. agent 1’s policy (th1) and value (val1)
-        grad_fn = jax.grad(in_lookahead, argnums=[2, 4])
-        grad_th1, grad_v1 = grad_fn(
-            subkey,
-            th1, th1_params, val1, val1_params,
-            th2, th2_params, val2, val2_params,
-            old_th, old_val,
-            other_agent=1
-        )
-        # Update agent 1
-        th1_updated = th1.apply_gradients(grads=grad_th1)
-        val1_updated = val1.apply_gradients(grads=grad_v1) if use_baseline else val1
-
+        # Update agent-1's parameters
+        th1_updated = th1.apply_gradients(grads=grad_th)
+        val1_updated = val1.apply_gradients(grads=grad_val) if use_baseline else val1
         new_scan_carry = (
             key,
-            th1_updated, th1_updated.params,
-            val1_updated, val1_updated.params,
-            th2, th2_params,
-            val2, val2_params,
-            old_th, old_val
+            th1_updated, val1_updated,  # updated
+            th2, val2,                 # unchanged
+            old_th, old_val,
+            other_agent
         )
-
     else:
-        # other_agent == 2
-        # We differentiate w.r.t. agent 2’s policy (th2) and value (val2)
-        grad_fn = jax.grad(in_lookahead, argnums=[6, 8])
-        grad_th2, grad_v2 = grad_fn(
-            subkey,
-            th1, th1_params, val1, val1_params,
-            th2, th2_params, val2, val2_params,
-            old_th, old_val,
-            other_agent=2
-        )
-        # Update agent 2
-        th2_updated = th2.apply_gradients(grads=grad_th2)
-        val2_updated = val2.apply_gradients(grads=grad_v2) if use_baseline else val2
-
+        # Update agent-2's parameters
+        th2_updated = th2.apply_gradients(grads=grad_th)
+        val2_updated = val2.apply_gradients(grads=grad_val) if use_baseline else val2
         new_scan_carry = (
             key,
-            th1, th1_params,
-            val1, val1_params,
-            th2_updated, th2_updated.params,
-            val2_updated, val2_updated.params,
-            old_th, old_val
+            th1, val1,                 # unchanged
+            th2_updated, val2_updated, # updated
+            old_th, old_val,
+            other_agent
         )
 
     return new_scan_carry, None
 
 @jit
 def inner_steps_plus_update_otheragent(
-    key, th1, th1_params, val1, val1_params,
-    th2, th2_params, val2, val2_params,
+    key,
+    th1, val1,
+    th2, val2,
     old_th, old_val,
     other_agent=1
 ):
     """
-    Runs `args.inner_steps` of inner-loop updates for the specified `other_agent`.
-    Returns the updated (th, val) TrainStates for that agent. The other agent's
-    parameters remain fixed during these inner updates.
+    Runs `args.inner_steps` of inner updates for the specified `other_agent`.
+    Returns the newly updated (policy, value) for that agent, leaving the other fixed.
 
-    If other_agent=1:
-      - We create "th1_prime" and "val1_prime" for agent 1, then run inner steps
-        that update only agent 1's parameters. Agent 2's are held fixed.
-    If other_agent=2:
-      - We create "th2_prime" and "val2_prime" for agent 2, then run inner steps
-        that update only agent 2's parameters. Agent 1's are held fixed.
+    If other_agent=1, we create fresh copies for agent 1’s policy & value
+    with an SGD optimizer. If other_agent=2, we do the analogous thing for agent 2.
     """
+    # Decide which agent’s policy & value we “prime”
     if other_agent == 1:
         # Create a fresh TrainState for agent 1
         th_prime = TrainState.create(
             apply_fn=th1.apply_fn,
-            params=th1_params,
+            params=th1.params,
             tx=optax.sgd(learning_rate=args.lr_in)
         )
-        val_prime = (TrainState.create(
-            apply_fn=val1.apply_fn,
-            params=val1_params,
-            tx=optax.sgd(learning_rate=args.lr_v))
+        val_prime = (
+            TrainState.create(
+                apply_fn=val1.apply_fn,
+                params=val1.params,
+                tx=optax.sgd(learning_rate=args.lr_v)
+            )
             if use_baseline else val1
         )
-
-        # Prepare the initial carry
+        # Initial carry
         carry_init = (
             key,
-            th_prime, th_prime.params,
-            val_prime, val_prime.params,
-            th2, th2_params,
-            val2, val2_params,
+            th_prime, val_prime,
+            th2, val2,
             old_th, old_val
         )
-
-        # Perform the first inner step
-        carry_after, _ = inner_step_get_grad_otheragent(carry_init, None, other_agent=1)
-        (key_after,
-         th_prime, th_prime_params,
-         val_prime, val_prime_params,
-         _, _, _, _, _, _) = carry_after
-
-        # Additional inner steps (if args.inner_steps > 1)
-        if args.inner_steps > 1:
-            carry_loop = (
-                key_after,
-                th_prime, th_prime.params,
-                val_prime, val_prime.params,
-                th2, th2_params,
-                val2, val2_params,
-                old_th, old_val
-            )
-            carry_loop, _ = jax.lax.scan(
-                lambda c, _: inner_step_get_grad_otheragent(c, None, other_agent=1),
-                carry_loop,
-                None,
-                args.inner_steps - 1
-            )
-
     else:
         # other_agent == 2
         # Create a fresh TrainState for agent 2
         th_prime = TrainState.create(
             apply_fn=th2.apply_fn,
-            params=th2_params,
+            params=th2.params,
             tx=optax.sgd(learning_rate=args.lr_in)
         )
-        val_prime = (TrainState.create(
-            apply_fn=val2.apply_fn,
-            params=val2_params,
-            tx=optax.sgd(learning_rate=args.lr_v))
+        val_prime = (
+            TrainState.create(
+                apply_fn=val2.apply_fn,
+                params=val2.params,
+                tx=optax.sgd(learning_rate=args.lr_v)
+            )
             if use_baseline else val2
         )
-
+        # Initial carry: put pol_prime/val_prime in agent-2 slot
         carry_init = (
             key,
-            th1, th1_params,
-            val1, val1_params,
-            th_prime, th_prime.params,
-            val_prime, val_prime.params,
+            th1, val1,
+            th_prime, val_prime,
             old_th, old_val
         )
 
-        # Perform the first inner step
-        carry_after, _ = inner_step_get_grad_otheragent(carry_init, None, other_agent=2)
-        (key_after,
-         _, _, _, _,
-         th_prime, th_prime_params,
-         val_prime, val_prime_params,
-         _, _) = carry_after
+    # Perform the first step
+    carry_after, _ = inner_step_get_grad_otheragent(carry_init, None, other_agent=other_agent)
 
-        # Additional inner steps (if args.inner_steps > 1)
-        if args.inner_steps > 1:
-            carry_loop = (
-                key_after,
-                th1, th1_params,
-                val1, val1_params,
-                th_prime, th_prime.params,
-                val_prime, val_prime.params,
-                old_th, old_val
-            )
-            carry_loop, _ = jax.lax.scan(
-                lambda c, _: inner_step_get_grad_otheragent(c, None, other_agent=2),
-                carry_loop,
-                None,
-                args.inner_steps - 1
-            )
-            (_, _, _, _, th_prime, _, val_prime, _, _, _) = carry_loop
+    # Extract out the updated pol_prime, val_prime
+    if other_agent == 1:
+        (key_after, th_prime, val_prime, _, _, old_th_ref, old_val_ref) = carry_after
+    else:
+        (key_after, _, _, th_prime, val_prime, old_th_ref, old_val_ref) = carry_after
+
+    # If we have more inner steps, do them via a scan
+    if args.inner_steps > 1:
+        def scan_fn(carry, _):
+            return inner_step_get_grad_otheragent(carry, None, other_agent=other_agent)
+
+        carry_loop, _ = jax.lax.scan(
+            scan_fn,
+            carry_after,
+            None,
+            length=args.inner_steps - 1
+        )
+        # At the end of the scan, parse the final pol_prime, val_prime
+        if other_agent == 1:
+            (_, th_prime, val_prime, _, _, _, _) = carry_loop
+        else:
+            (_, _, _, th_prime, val_prime, _, _) = carry_loop
 
     return th_prime, val_prime
-
 
 ###############################################################################
 #    Outer-Loop Minimization for the "Self" Agent (POLA Outer Step)           #
