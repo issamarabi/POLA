@@ -626,15 +626,18 @@ def inner_steps_plus_update_otheragent(
     other_agent=1
 ):
     """
-    Runs `args.inner_steps` of inner updates for the specified `other_agent`.
-    Returns the newly updated (policy, value) for that agent, leaving the other fixed.
+    Runs `args.inner_steps` of inner updates for the specified `other_agent`,
+    returning the newly updated (policy, value) for that agent while
+    leaving the other agent's parameters fixed.
 
-    If other_agent=1, we create fresh copies for agent 1’s policy & value
-    with an SGD optimizer. If other_agent=2, we do the analogous thing for agent 2.
+    We:
+      1) "prime" the agent-of-interest (re-initialize its TrainState with SGD optimizer),
+      2) place everything in a single carry tuple (including `other_agent`),
+      3) run `jax.lax.scan(inner_step_get_grad_otheragent, ...)` for `args.inner_steps`,
+      4) extract the final updated train states for that agent from the final carry.
     """
-    # Decide which agent’s policy & value we “prime”
+    # 1) Decide which agent’s policy & value we “prime”
     if other_agent == 1:
-        # Create a fresh TrainState for agent 1
         th_prime = TrainState.create(
             apply_fn=th1.apply_fn,
             params=th1.params,
@@ -648,16 +651,16 @@ def inner_steps_plus_update_otheragent(
             )
             if use_baseline else val1
         )
-        # Initial carry
+        # 2) Construct the initial carry with agent-1 in prime
         carry_init = (
             key,
-            th_prime, val_prime,
-            th2, val2,
-            old_th, old_val
+            th_prime, val_prime,  # agent-1's updated states
+            th2, val2,            # agent-2's unchanged states
+            old_th, old_val,
+            1  # other_agent
         )
     else:
         # other_agent == 2
-        # Create a fresh TrainState for agent 2
         th_prime = TrainState.create(
             apply_fn=th2.apply_fn,
             params=th2.params,
@@ -671,41 +674,29 @@ def inner_steps_plus_update_otheragent(
             )
             if use_baseline else val2
         )
-        # Initial carry: put pol_prime/val_prime in agent-2 slot
         carry_init = (
             key,
-            th1, val1,
-            th_prime, val_prime,
-            old_th, old_val
+            th1, val1,           # agent-1's unchanged states
+            th_prime, val_prime, # agent-2's updated states
+            old_th, old_val,
+            2  # other_agent
         )
 
-    # Perform the first step
-    carry_after, _ = inner_step_get_grad_otheragent(carry_init, None, other_agent=other_agent)
+    # 3) Run `args.inner_steps` of updates via a single scan
+    final_carry, _ = jax.lax.scan(
+        inner_step_get_grad_otheragent,
+        carry_init,
+        None,
+        length=args.inner_steps
+    )
 
-    # Extract out the updated pol_prime, val_prime
+    # 4) Extract final updated policy/value for the agent-of-interest
     if other_agent == 1:
-        (key_after, th_prime, val_prime, _, _, old_th_ref, old_val_ref) = carry_after
+        (_, th1_f, val1_f, _, _, _, _, _) = final_carry
+        return th1_f, val1_f
     else:
-        (key_after, _, _, th_prime, val_prime, old_th_ref, old_val_ref) = carry_after
-
-    # If we have more inner steps, do them via a scan
-    if args.inner_steps > 1:
-        def scan_fn(carry, _):
-            return inner_step_get_grad_otheragent(carry, None, other_agent=other_agent)
-
-        carry_loop, _ = jax.lax.scan(
-            scan_fn,
-            carry_after,
-            None,
-            length=args.inner_steps - 1
-        )
-        # At the end of the scan, parse the final pol_prime, val_prime
-        if other_agent == 1:
-            (_, th_prime, val_prime, _, _, _, _) = carry_loop
-        else:
-            (_, _, _, th_prime, val_prime, _, _) = carry_loop
-
-    return th_prime, val_prime
+        (_, _, _, th2_f, val2_f, _, _, _) = final_carry
+        return th2_f, val2_f
 
 ###############################################################################
 #    Outer-Loop Minimization for the "Self" Agent (POLA Outer Step)           #
