@@ -771,86 +771,59 @@ def one_outer_step_objective_selfagent(
     Single outer-step objective for the specified `self_agent`.
 
     Steps:
-      1) Run the inner step(s) for the *other* agent (the opponent).
-      2) Evaluate the final objective from the perspective of `self_agent`.
+      1) Run the inner step(s) for the *opponent* (other_agent).
+      2) Evaluate final objective from `self_agent`’s vantage point.
 
     If self_agent=1:
-      - Opponent is agent 2. We run inner_steps_plus_update_otheragent(... other_agent=2 ...),
-        then compute out_lookahead(... self_agent=1 ...).
+      - Opponent is agent=2
+      - Evaluate out_lookahead(... self_agent=1 ...)
     If self_agent=2:
-      - Opponent is agent 1. We run inner_steps_plus_update_otheragent(... other_agent=1 ...),
-        then compute out_lookahead(... self_agent=2 ...).
+      - Opponent is agent=1
+      - Evaluate out_lookahead(... self_agent=2 ...)
 
     Returns (objective, state_hist).
     """
-    if self_agent == 1:
-        # 1) Inner step for agent 2
-        key, subkey = jax.random.split(key)
-        th2_after_inner, val2_after_inner = inner_steps_plus_update_otheragent(
-            subkey,
-            th1_copy, th1_copy_params,
-            val1_copy, val1_copy_params,
-            th2_copy, th2_copy_params,
-            val2_copy, val2_copy_params,
-            th2_copy, val2_copy,
-            other_agent=2
-        )
-        # 2) Evaluate agent 1's vantage point
-        if use_baseline:
-            objective, state_hist = out_lookahead(
-                key,
-                th1_copy, th1_copy_params,
-                val1_copy, val1_copy_params,
-                th2_after_inner, th2_after_inner.params,
-                val2_after_inner, val2_after_inner.params,
-                th_ref, val_ref,
-                self_agent=1
-            )
-        else:
-            objective, state_hist = out_lookahead(
-                key,
-                th1_copy, th1_copy_params,
-                None, None,
-                th2_after_inner, th2_after_inner.params,
-                None, None,
-                th_ref, val_ref,
-                self_agent=1
-            )
 
-    else:
-        # self_agent == 2
-        # 1) Inner step for agent 1
-        key, subkey = jax.random.split(key)
-        th1_after_inner, val1_after_inner = inner_steps_plus_update_otheragent(
-            subkey,
+    # Identify opponent
+    other_agent = 2 if (self_agent == 1) else 1
+
+    # 1) Inner step for the opponent
+    key, subkey = jax.random.split(key)
+    updated_th_opp, updated_val_opp = inner_steps_plus_update_otheragent(
+        subkey,
+        th1_copy, th1_copy_params,
+        val1_copy, val1_copy_params,
+        th2_copy, th2_copy_params,
+        val2_copy, val2_copy_params,
+        # The old (reference) for the *opponent*:
+        th2_copy if other_agent == 2 else th1_copy,
+        val2_copy if other_agent == 2 else val1_copy,
+        other_agent=other_agent
+    )
+
+    # 2) Evaluate final objective from self_agent's perspective
+    if self_agent == 1:
+        # The updated opponent is agent 2
+        objective, state_hist = out_lookahead(
+            key,
             th1_copy, th1_copy_params,
-            val1_copy, val1_copy_params,
-            th2_copy, th2_copy_params,
-            val2_copy, val2_copy_params,
-            th1_copy, val1_copy,
-            other_agent=1
+            val1_copy, val1_copy_params if use_baseline else None,
+            updated_th_opp, updated_th_opp.params,
+            updated_val_opp, updated_val_opp.params if use_baseline else None,
+            th_ref, val_ref,
+            self_agent=1
         )
-        # 2) Evaluate agent 2's vantage point
-        if use_baseline:
-            objective, state_hist = out_lookahead(
-                key,
-                th1_after_inner, th1_after_inner.params,
-                val1_after_inner, val1_after_inner.params,
-                th2_copy, th2_copy_params,
-                val2_copy, val2_copy_params,
-                th_ref, val_ref,
-                self_agent=2
-            )
-        else:
-            objective, state_hist = out_lookahead(
-                key,
-                th1_after_inner, th1_after_inner.params,
-                None, None,
-                th2_copy, th2_copy_params,
-                None, None,
-                th_ref, val_ref,
-                self_agent=2
-            )
+    else:
+        # self_agent == 2 => The updated opponent is agent 1
+        objective, state_hist = out_lookahead(
+            key,
+            updated_th_opp, updated_th_opp.params,
+            updated_val_opp, updated_val_opp.params if use_baseline else None,
+            th2_copy, th2_copy_params,
+            val2_copy, val2_copy_params if use_baseline else None,
+            th_ref, val_ref,
+            self_agent=2
+        )
 
     return objective, state_hist
 
