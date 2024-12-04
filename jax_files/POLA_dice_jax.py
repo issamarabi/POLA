@@ -833,7 +833,7 @@ def one_outer_step_objective_selfagent(
 ###############################################################################
 
 @jit
-def one_outer_step_update_selfagent(scan_carry, _, self_agent=1):
+def one_outer_step_update_selfagent(scan_carry, _):
     """
     For one outer-step update of the specified `self_agent`:
       1) Compute gradient wrt that agent's policy/value,
@@ -844,54 +844,43 @@ def one_outer_step_update_selfagent(scan_carry, _, self_agent=1):
 
     Returns updated_scan_carry and state_hist.
     """
-    (key, th1_copy, val1_copy, th2_copy, val2_copy, th_ref, val_ref) = scan_carry
+    (key, th1_copy, val1_copy, th2_copy, val2_copy, th_ref, val_ref, self_agent) = scan_carry
     key, subkey = jax.random.split(key)
 
-    if self_agent == 1:
-        # Grad wrt agent 1's policy and value => argnums=[2,4]
-        grad_fn = jax.grad(one_outer_step_objective_selfagent, argnums=[2, 4], has_aux=True)
-        (grad_th, grad_val), state_hist = grad_fn(
-            subkey,
-            th1_copy, th1_copy.params,
-            val1_copy, val1_copy.params,
-            th2_copy, th2_copy.params,
-            val2_copy, val2_copy.params,
-            th_ref, val_ref,
-            self_agent=1
-        )
-        th_copy_updated = th1_copy.apply_gradients(grads=grad_th)
-        val_copy_updated = (val1_copy.apply_gradients(grads=grad_val)
-                            if use_baseline else val1_copy)
+    argnums = [2, 4] if self_agent == 1 else [6, 8]
+    grad_fn = jax.grad(one_outer_step_objective_selfagent, argnums=argnums, has_aux=True)
+    (grad_th, grad_val), state_hist = grad_fn(
+        subkey,
+        th1_copy, th1_copy.params,
+        val1_copy, val1_copy.params,
+        th2_copy, th2_copy.params,
+        val2_copy, val2_copy.params,
+        th_ref, val_ref,
+        self_agent=self_agent
+    )
 
+    th_copy_agent = th1_copy if self_agent == 1 else th2_copy
+    val_copy_agent = val1_copy if self_agent == 1 else val2_copy
+
+    th_copy_updated = th_copy_agent.apply_gradients(grads=grad_th)
+    val_copy_updated = (val_copy_agent.apply_gradients(grads=grad_val)
+                        if use_baseline else val_copy_agent)
+
+    if self_agent == 1:
         updated_scan_carry = (
             key,
             th_copy_updated, val_copy_updated,
             th2_copy, val2_copy,
-            th_ref, val_ref
-        )
-
-    else:
-        # self_agent == 2
-        # Grad wrt agent 2's policy and value => argnums=[6,8]
-        grad_fn = jax.grad(one_outer_step_objective_selfagent, argnums=[6, 8], has_aux=True)
-        (grad_th, grad_val), state_hist = grad_fn(
-            subkey,
-            th1_copy, th1_copy.params,
-            val1_copy, val1_copy.params,
-            th2_copy, th2_copy.params,
-            val2_copy, val2_copy.params,
             th_ref, val_ref,
-            self_agent=2
+            self_agent
         )
-        th_copy_updated = th2_copy.apply_gradients(grads=grad_th)
-        val_copy_updated = (val2_copy.apply_gradients(grads=grad_val)
-                            if use_baseline else val2_copy)
-
+    else:
         updated_scan_carry = (
             key,
             th1_copy, val1_copy,
             th_copy_updated, val_copy_updated,
-            th_ref, val_ref
+            th_ref, val_ref,
+            self_agent
         )
 
     return updated_scan_carry, state_hist
