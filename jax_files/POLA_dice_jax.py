@@ -1580,9 +1580,9 @@ def play(key, init_th1, init_val1, init_th2, init_val2, use_opp_model=False):
             val2_copy = TrainState.create(apply_fn=agent1_om_val2.apply_fn, params=agent1_om_val2.params, tx=agent1_om_val2.tx)
 
         key, subkey_o1 = jax.random.split(key)
-        init_scan_carry = (subkey_o1, th1_copy, val1_copy, th2_copy, val2_copy, th1_ref, val1_ref)
-        final_scan_carry, _ = jax.lax.scan(one_outer_step_update_selfagent1, init_scan_carry, None, args.outer_steps)
-        (_, th1_copy_updated, val1_copy_updated, _, _, _, _) = final_scan_carry
+        init_scan_carry = (subkey_o1, th1_copy, val1_copy, th2_copy, val2_copy, th1_ref, val1_ref, 1)
+        final_scan_carry, _ = jax.lax.scan(one_outer_step_update_selfagent, init_scan_carry, None, args.outer_steps)
+        (_, th1_copy_updated, val1_copy_updated, _, _, _, _, _) = final_scan_carry
 
         #----------------- Agent 2 Outer Update -----------------#
         # Reset copies to the original main states ( so agent2 sees agent1's real final from prev iteration, etc.)
@@ -1601,9 +1601,9 @@ def play(key, init_th1, init_val1, init_th2, init_val2, use_opp_model=False):
             val1_copy2 = TrainState.create(apply_fn=agent2_om_val1.apply_fn, params=agent2_om_val1.params, tx=agent2_om_val1.tx)
 
         key, subkey_o2 = jax.random.split(key)
-        init_scan_carry2 = (subkey_o2, th1_copy2, val1_copy2, th2_copy2, val2_copy2, th2_ref, val2_ref)
-        final_scan_carry2, _ = jax.lax.scan(one_outer_step_update_selfagent2, init_scan_carry2, None, args.outer_steps)
-        (_, th1_copy2_, val1_copy2_, th2_copy_updated, val2_copy_updated, _, _) = final_scan_carry2
+        init_scan_carry2 = (subkey_o2, th1_copy2, val1_copy2, th2_copy2, val2_copy2, th2_ref, val2_ref, 2)
+        final_scan_carry2, _ = jax.lax.scan(one_outer_step_update_selfagent, init_scan_carry2, None, args.outer_steps)
+        (_, th1_copy2_, val1_copy2_, th2_copy_updated, val2_copy_updated, _, _, _) = final_scan_carry2
 
         # Overwrite main states with final updated copies
         th1 = th1_copy_updated
