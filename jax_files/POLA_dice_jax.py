@@ -1523,28 +1523,33 @@ def inspect_ipd(trainstates_p, trainstates_val):
         print(f"Policy Probabilities: {pol_probs}")
 
 
-def play(
-    key: jnp.ndarray,
-    trainstates_p: list,  # [n_agents] of policy states
-    trainstates_v: list,  # [n_agents] of value states
-    use_opp_model: bool = False
+def play(key: jnp.ndarray,
+         trainstates_p: list,  # List of policy TrainStates (length = n_agents)
+         trainstates_v: list,  # List of value TrainStates (length = n_agents)
+         use_opp_model: bool = False
     ):
     """
     Main N-agent training loop.
 
     Each iteration consists of:
       1) Evaluation and logging.
-      2) Sequential update for each agent:
+      2) Sequential outer-loop updates for each agent:
          - Optionally update opponent models.
-         - Perform outer loop optimization step using `one_outer_step_update_selfagent`.
-         - Update agent's policy and value function parameters.
+         - Perform outer-loop optimization using `one_outer_step_update_selfagent`.
+         - Update the agent's policy and value parameters.
     """
     print(f"Starting N-agent training with {args.inner_steps} inner steps and {args.outer_steps} outer steps per update.")
+
+    # Helper: make a fresh copy of a list of train states
+    def copy_trainstates(states):
+        return [TrainState.create(apply_fn=ts.apply_fn, params=ts.params, tx=ts.tx) for ts in states]
+
     score_record = []
     vs_fixed_strats_score_record = []
 
-    p_states = [TrainState.create(apply_fn=ts.apply_fn, params=ts.params, tx=ts.tx) for ts in trainstates_p]
-    v_states = [TrainState.create(apply_fn=ts.apply_fn, params=ts.params, tx=ts.tx) for ts in trainstates_v]
+    # Create initial copies of the train states
+    p_states = copy_trainstates(trainstates_p)
+    v_states = copy_trainstates(trainstates_v)
 
     if use_opp_model:
         key, subkey = jax.random.split(key)
@@ -1558,66 +1563,44 @@ def play(
     print("Initial average scores across agents:", init_scores)
     print("Initial scores vs fixed strategies:", fixed_scores)
 
+    # Main training loop over update iterations
     for update_idx in range(args.n_update):
-        # For reference in the KL penalty, create "old" copies that are NOT updated
-        p_ref = [TrainState.create(apply_fn=ts.apply_fn,
-                                   params=ts.params,
-                                   tx=ts.tx)
-                 for ts in p_states]
-        v_ref = [TrainState.create(apply_fn=ts.apply_fn,
-                                   params=ts.params,
-                                   tx=ts.tx)
-                 for ts in v_states]
-        
-        #----------------- Agent 1 Outer Update -----------------#
-        p_copy = [TrainState.create(apply_fn=ts.apply_fn,
-                                    params=ts.params,
-                                    tx=ts.tx)
-                 for ts in p_states]
-        v_copy = [TrainState.create(apply_fn=ts.apply_fn,
-                                    params=ts.params,
-                                    tx=ts.tx)
-                 for ts in v_states]
+        # Create reference copies (for the KL penalty) that will remain unchanged during this update
+        p_ref = copy_trainstates(p_states)
+        v_ref = copy_trainstates(v_states)
+
+        # --- Update for agent 0 ---
+        p_copy = copy_trainstates(p_states)
+        v_copy = copy_trainstates(v_states)
         
         if use_opp_model:
-            # Update the opponent models
             key, subkey = jax.random.split(key)
-            om_p_state, om_v_state = opp_model_selfagent(
-                subkey, p_states, v_states, om_p_states, om_v_states, 0
-            )
+            # Update the opponent model for agent 0 if applicable
+            om_p_state, om_v_state = opp_model_selfagent(subkey, p_states, v_states, om_p_states, om_v_states, 0)
             p_copy[0] = om_p_state
             v_copy[0] = om_v_state
 
         key, subkey = jax.random.split(key)
-        init_scan_carry = (key, p_copy, v_copy, p_ref, v_ref, 1)
-        final_scan_carry, _ = jax.lax.scan(one_outer_step_update_selfagent, init_scan_carry, None, args.outer_steps)
-        p_copy, v_copy = final_scan_carry[1], final_scan_carry[2]
+        init_scan_state = (subkey, p_copy, v_copy, p_ref, v_ref, 0)
+        final_scan_state, _ = jax.lax.scan(one_outer_step_update_selfagent, init_scan_state, None, args.outer_steps)
+        p_copy, v_copy = final_scan_state[1], final_scan_state[2]
 
-        # Loop over each agent i for outer-step update
-        for i in range(1, args.n_agents):
-
-            p_working = [TrainState.create(apply_fn=ts.apply_fn,
-                                           params=ts.params,
-                                           tx=ts.tx)
-                         for ts in p_states]
-            v_working = [TrainState.create(apply_fn=ts.apply_fn,
-                                           params=ts.params,
-                                           tx=ts.tx)
-                         for ts in v_states]
-
+        # --- Update for agents 1 ... (n_agents - 1) ---
+        for agent_i in range(1, args.n_agents):
+            p_working = copy_trainstates(p_states)
+            v_working = copy_trainstates(v_states)
             if use_opp_model:
                 key, subkey = jax.random.split(key)
-                om_p_state, om_v_state = opp_model_selfagent(
-                    subkey, p_working, v_working, om_p_states, om_v_states, i
-                )
-                p_working[i] = om_p_state
-                v_working[i] = om_v_state  
+                om_p_state, om_v_state = opp_model_selfagent(subkey, p_working, v_working, om_p_states, om_v_states, agent_i)
+                p_working[agent_i] = om_p_state
+                v_working[agent_i] = om_v_state
 
-            scan_init = (key, p_working, v_working, p_ref, v_ref, i)
-            final_carry, _ = jax.lax.scan(one_outer_step_update_selfagent, scan_init, None, length=args.outer_steps)
-            p_copy, v_copy = final_carry[1], final_carry[2]
+            init_scan_state = (subkey, p_working, v_working, p_ref, v_ref, agent_i)
+            final_scan_state, _ = jax.lax.scan(one_outer_step_update_selfagent, init_scan_state, None, args.outer_steps)
+            # Update p_copy and v_copy with the results of the scan for agent_i
+            p_copy, v_copy = final_scan_state[1], final_scan_state[2]
 
-            # Overwrite the main states for agent i with the updated ones
+            # Overwrite the corresponding agent entry in the global state
             p_states = p_copy
             v_states = v_copy
 
@@ -1627,6 +1610,7 @@ def play(
         score_record.append(scores)
         vs_fixed_strats_score_record.append(fixed_scores)
 
+        # Print progress if required
         if (update_idx + 1) % args.print_every == 0:
             print("*" * 10)
             print(f"Epoch: {update_idx + 1}")
@@ -1641,6 +1625,7 @@ def play(
         if args.env == 'ipd' and args.inspect_ipd:
             inspect_ipd(p_states, v_states)
 
+        # Save checkpoint if required
         if (update_idx + 1) % args.checkpoint_every == 0:
             now = datetime.datetime.now()
             checkpoints.save_checkpoint(
