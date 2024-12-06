@@ -1523,137 +1523,150 @@ def inspect_ipd(trainstates_p, trainstates_val):
         print(f"Policy Probabilities: {pol_probs}")
 
 
-def play(key, init_th1, init_val1, init_th2, init_val2, use_opp_model=False):
+def play(
+    key: jnp.ndarray,
+    trainstates_p: list,  # [n_agents] of policy states
+    trainstates_v: list,  # [n_agents] of value states
+    use_opp_model: bool = False
+):
     """
-    Main training loop that repeatedly:
-      1) Saves snapshot of performance,
-      2) Runs the outer-step for agent 1,
-      3) Runs the outer-step for agent 2,
-      4) Logs progress & optionally writes checkpoints.
+    Main N-agent training loop.
+
+    We do the following each iteration:
+      1) Evaluate or log stats if desired
+      2) For each agent i in [0..n_agents-1]:
+         a) 'opponent_idx' = choose an opponent or set of opponents
+         b) Run a scan of 'one_outer_step_update_selfagent' for args.outer_steps times
+         c) Overwrite the main states with the final updated ones
     """
-    print("start iterations with", args.inner_steps, "inner steps and", args.outer_steps, "outer steps:")
+    print("Starting N-agent training with", args.inner_steps, "inner steps and", args.outer_steps, "outer steps per update.")
     score_record = []
-    vs_fixed_strats_score_record = [[], []]
-    same_colour_coins_record = []
-    diff_colour_coins_record = []
+    vs_fixed_strats_score_record = []
 
-    th1 = TrainState.create(apply_fn=init_th1.apply_fn, params=init_th1.params, tx=init_th1.tx)
-    val1 = TrainState.create(apply_fn=init_val1.apply_fn, params=init_val1.params, tx=init_val1.tx)
-    th2 = TrainState.create(apply_fn=init_th2.apply_fn, params=init_th2.params, tx=init_th2.tx)
-    val2 = TrainState.create(apply_fn=init_val2.apply_fn, params=init_val2.params, tx=init_val2.tx)
+    p_states = [
+        TrainState.create(
+            apply_fn=ts.apply_fn,
+            params=ts.params,
+            tx=ts.tx
+        ) for ts in trainstates_p
+    ]
+    v_states = [
+        TrainState.create(
+            apply_fn=ts.apply_fn,
+            params=ts.params,
+            tx=ts.tx
+        ) for ts in trainstates_v
+    ]
 
-    if args.opp_model:
+    if use_opp_model:
         key, subkey = jax.random.split(key)
-        agent1_om_th2, agent1_om_val2, agent2_om_th1, agent2_om_val1 = get_init_trainstates(subkey, action_size, input_size)
-
+        om_p_states, om_v_states = get_init_trainstates(subkey, n_agents, action_size, input_size)
 
     # Evaluate initial performance
     key, subkey = jax.random.split(key)
-    score1, score2, rr_matches, rb_matches, br_matches, bb_matches, sc1rec, sc2rec = eval_progress(subkey, th1, val1, th2, val2)
-    if args.env == "coin":
-        same_colour_coins_record.append(rr_matches + bb_matches)
-        diff_colour_coins_record.append(rb_matches + br_matches)
-    vs_fixed_strats_score_record[0].append(sc1rec)
-    vs_fixed_strats_score_record[1].append(sc2rec)
-    score_record.append(jnp.stack((score1, score2)))
+    init_scores, fixed_scores, _ = eval_progress(subkey, p_states, v_states)
+    score_record = [init_scores]
+    vs_fixed_strats_score_record = [fixed_scores]
+    print("Initial average scores across agents:", init_scores)
+    print("Initial scores vs fixed strategies:", fixed_scores)
 
     for update_idx in range(args.n_update):
-        # For referencing the agent's old parameters in the KL penalty (NOT TO BE UPDATED)
-        th1_ref = TrainState.create(apply_fn=th1.apply_fn, params=th1.params, tx=th1.tx)
-        val1_ref = TrainState.create(apply_fn=val1.apply_fn, params=val1.params, tx=val1.tx)
-        th2_ref = TrainState.create(apply_fn=th2.apply_fn, params=th2.params, tx=th2.tx)
-        val2_ref = TrainState.create(apply_fn=val2.apply_fn, params=val2.params, tx=val2.tx)
-
+        # For reference in the KL penalty, create "old" copies that are NOT updated
+        p_ref = [TrainState.create(apply_fn=ts.apply_fn,
+                                   params=ts.params,
+                                   tx=ts.tx)
+                 for ts in p_states]
+        v_ref = [TrainState.create(apply_fn=ts.apply_fn,
+                                   params=ts.params,
+                                   tx=ts.tx)
+                 for ts in v_states]
+        
         #----------------- Agent 1 Outer Update -----------------#
-        th1_copy = TrainState.create(apply_fn=th1.apply_fn, params=th1.params, tx=th1.tx)
-        val1_copy = TrainState.create(apply_fn=val1.apply_fn, params=val1.params, tx=val1.tx)
-        th2_copy = TrainState.create(apply_fn=th2.apply_fn, params=th2.params, tx=th2.tx)
-        val2_copy = TrainState.create(apply_fn=val2.apply_fn, params=val2.params, tx=val2.tx)
-
-        if args.opp_model:
-            key, subkey_om = jax.random.split(key)
-            agent1_om_th2, agent1_om_val2 = opp_model_selfagent1(
-                subkey_om, th1_copy, val1_copy, th2_copy, val2_copy,
-                agent1_om_th2, agent1_om_val2
+        p_copy = [TrainState.create(apply_fn=ts.apply_fn,
+                                    params=ts.params,
+                                    tx=ts.tx)
+                 for ts in p_states]
+        v_copy = [TrainState.create(apply_fn=ts.apply_fn,
+                                    params=ts.params,
+                                    tx=ts.tx)
+                 for ts in v_states]
+        
+        if use_opp_model:
+            # Update the opponent models
+            key, subkey = jax.random.split(key)
+            om_p_states, om_v_states = opp_model_selfagent(
+                subkey, p_states, v_states, om_p_states, om_v_states, 0
             )
-            th2_copy = TrainState.create(apply_fn=agent1_om_th2.apply_fn, params=agent1_om_th2.params, tx=agent1_om_th2.tx)
-            val2_copy = TrainState.create(apply_fn=agent1_om_val2.apply_fn, params=agent1_om_val2.params, tx=agent1_om_val2.tx)
+            p_copy[1:] = om_p_states[1:]
+            v_copy[1:] = om_v_states[1:]
 
-        key, subkey_o1 = jax.random.split(key)
-        init_scan_carry = (subkey_o1, th1_copy, val1_copy, th2_copy, val2_copy, th1_ref, val1_ref, 1)
+        key, subkey = jax.random.split(key)
+        init_scan_carry = (key, p_copy, v_copy, p_ref, v_ref, 1)
         final_scan_carry, _ = jax.lax.scan(one_outer_step_update_selfagent, init_scan_carry, None, args.outer_steps)
-        (_, th1_copy_updated, val1_copy_updated, _, _, _, _, _) = final_scan_carry
+        p_copy, v_copy = final_scan_carry[1], final_scan_carry[2]
 
-        #----------------- Agent 2 Outer Update -----------------#
-        # Reset copies to the original main states ( so agent2 sees agent1's real final from prev iteration, etc.)
-        th1_copy2 = TrainState.create(apply_fn=th1.apply_fn, params=th1.params, tx=th1.tx)
-        val1_copy2 = TrainState.create(apply_fn=val1.apply_fn, params=val1.params, tx=val1.tx)
-        th2_copy2 = TrainState.create(apply_fn=th2.apply_fn, params=th2.params, tx=th2.tx)
-        val2_copy2 = TrainState.create(apply_fn=val2.apply_fn, params=val2.params, tx=val2.tx)
+        # Loop over each agent i for outer-step update
+        for i in range(1, args.n_agents):
 
-        if args.opp_model:
-            key, subkey_om2 = jax.random.split(key)
-            agent2_om_th1, agent2_om_val1 = opp_model_selfagent2(
-                subkey_om2, th1_copy2, val1_copy2, th2_copy2, val2_copy2,
-                agent2_om_th1, agent2_om_val1
-            )
-            th1_copy2 = TrainState.create(apply_fn=agent2_om_th1.apply_fn, params=agent2_om_th1.params, tx=agent2_om_th1.tx)
-            val1_copy2 = TrainState.create(apply_fn=agent2_om_val1.apply_fn, params=agent2_om_val1.params, tx=agent2_om_val1.tx)
+            p_working = [TrainState.create(apply_fn=ts.apply_fn,
+                                           params=ts.params,
+                                           tx=ts.tx)
+                         for ts in p_states]
+            v_working = [TrainState.create(apply_fn=ts.apply_fn,
+                                           params=ts.params,
+                                           tx=ts.tx)
+                         for ts in v_states]
 
-        key, subkey_o2 = jax.random.split(key)
-        init_scan_carry2 = (subkey_o2, th1_copy2, val1_copy2, th2_copy2, val2_copy2, th2_ref, val2_ref, 2)
-        final_scan_carry2, _ = jax.lax.scan(one_outer_step_update_selfagent, init_scan_carry2, None, args.outer_steps)
-        (_, th1_copy2_, val1_copy2_, th2_copy_updated, val2_copy_updated, _, _, _) = final_scan_carry2
+            if use_opp_model:
+                key, subkey = jax.random.split(key)
+                om_p_state, om_v_state = opp_model_selfagent(
+                    subkey, p_working, v_working, om_p_states, om_v_states, i
+                )
+                p_working[i] = om_p_state
+                v_working[i] = om_v_state  
 
-        # Overwrite main states with final updated copies
-        th1 = th1_copy_updated
-        val1 = val1_copy_updated
-        th2 = th2_copy_updated
-        val2 = val2_copy_updated
+            scan_init = (key, p_working, v_working, p_ref, v_ref, i)
+            final_carry, _ = jax.lax.scan(one_outer_step_update_selfagent, scan_init, None, length=args.outer_steps)
+            p_copy, v_copy = final_carry[1], final_carry[2]
 
-        # Evaluate progress:
-        key, subkey_eval = jax.random.split(key)
-        s1, s2, rr_m, rb_m, br_m, bb_m, s1rec, s2rec = eval_progress(subkey_eval, th1, val1, th2, val2)
-        if args.env == 'coin':
-            same_colour_coins_record.append(rr_m + bb_m)
-            diff_colour_coins_record.append(rb_m + br_m)
-        vs_fixed_strats_score_record[0].append(s1rec)
-        vs_fixed_strats_score_record[1].append(s2rec)
-        score_record.append(jnp.stack((s1, s2)))
+            # Overwrite the main states for agent i with the updated ones
+            p_states = p_copy
+            v_states = v_copy
+
+        # After all agents have updated once, we evaluate
+        key, subkey = jax.random.split(key)
+        scores, fixed, _ = eval_progress(subkey, p_states, v_states)
+        score_record.append(scores)
+        vs_fixed_strats_score_record.append(fixed)
 
         if (update_idx + 1) % args.print_every == 0:
             print("*" * 10)
             print(f"Epoch: {update_idx + 1}")
-            print(f"Agent 1 Score: {s1}")
-            print(f"Agent 2 Score: {s2}")
-            if args.env == 'coin':
-                print("Same-colour coin pickups:", rr_m + bb_m)
-                print("Diff-colour coin pickups:", rb_m + br_m)
-                print("RR coins:", rr_m)
-                print("RB coins:", rb_m)
-                print("BR coins:", br_m)
-                print("BB coins:", bb_m)
-            print("Scores vs [ALLD, ALLC, TFT] for Agent1:", s1rec)
-            print("Scores vs [ALLD, ALLC, TFT] for Agent2:", s2rec)
+            for agent_i in range(args.n_agents):
+                print(f"  Agent {agent_i} score: {scores[agent_i]:.4f}")
+                fixed_scores_agent_i = fixed_scores[agent_i]
+                print(
+                    f"  Agent {agent_i} vs fixed strats: ALLD={fixed_scores_agent_i[0]:.4f},
+                      ALLC={fixed_scores_agent_i[1]:.4f}, TFT={fixed_scores_agent_i[2]:.4f}"
+                )
                         
-            if args.env == 'ipd' and args.inspect_ipd:
-                inspect_ipd(th1, val1, th2, val2)
+        if args.env == 'ipd' and args.inspect_ipd:
+            inspect_ipd(p_states, v_states)
 
         if (update_idx + 1) % args.checkpoint_every == 0:
             now = datetime.datetime.now()
             checkpoints.save_checkpoint(
                 ckpt_dir=args.save_dir,
                 target=(
-                    th1, val1, th2, val2,
-                    (same_colour_coins_record, diff_colour_coins_record),
+                    p_states,
+                    v_states,
                     score_record,
                     vs_fixed_strats_score_record
                 ),
                 step=update_idx + 1,
                 prefix=f"checkpoint_{now.strftime('%Y-%m-%d_%H-%M')}_seed{args.seed}_epoch"
             )
-
-    return []  # or return any final metrics
+    return score_record, vs_fixed_strats_score_record
 
 
 ################################################################################
