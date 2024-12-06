@@ -1528,35 +1528,23 @@ def play(
     trainstates_p: list,  # [n_agents] of policy states
     trainstates_v: list,  # [n_agents] of value states
     use_opp_model: bool = False
-):
+    ):
     """
     Main N-agent training loop.
 
-    We do the following each iteration:
-      1) Evaluate or log stats if desired
-      2) For each agent i in [0..n_agents-1]:
-         a) 'opponent_idx' = choose an opponent or set of opponents
-         b) Run a scan of 'one_outer_step_update_selfagent' for args.outer_steps times
-         c) Overwrite the main states with the final updated ones
+    Each iteration consists of:
+      1) Evaluation and logging.
+      2) Sequential update for each agent:
+         - Optionally update opponent models.
+         - Perform outer loop optimization step using `one_outer_step_update_selfagent`.
+         - Update agent's policy and value function parameters.
     """
-    print("Starting N-agent training with", args.inner_steps, "inner steps and", args.outer_steps, "outer steps per update.")
+    print(f"Starting N-agent training with {args.inner_steps} inner steps and {args.outer_steps} outer steps per update.")
     score_record = []
     vs_fixed_strats_score_record = []
 
-    p_states = [
-        TrainState.create(
-            apply_fn=ts.apply_fn,
-            params=ts.params,
-            tx=ts.tx
-        ) for ts in trainstates_p
-    ]
-    v_states = [
-        TrainState.create(
-            apply_fn=ts.apply_fn,
-            params=ts.params,
-            tx=ts.tx
-        ) for ts in trainstates_v
-    ]
+    p_states = [TrainState.create(apply_fn=ts.apply_fn, params=ts.params, tx=ts.tx) for ts in trainstates_p]
+    v_states = [TrainState.create(apply_fn=ts.apply_fn, params=ts.params, tx=ts.tx) for ts in trainstates_v]
 
     if use_opp_model:
         key, subkey = jax.random.split(key)
@@ -1565,8 +1553,8 @@ def play(
     # Evaluate initial performance
     key, subkey = jax.random.split(key)
     init_scores, fixed_scores, _ = eval_progress(subkey, p_states, v_states)
-    score_record = [init_scores]
-    vs_fixed_strats_score_record = [fixed_scores]
+    score_record.append(init_scores)
+    vs_fixed_strats_score_record.append(fixed_scores)
     print("Initial average scores across agents:", init_scores)
     print("Initial scores vs fixed strategies:", fixed_scores)
 
@@ -1594,11 +1582,11 @@ def play(
         if use_opp_model:
             # Update the opponent models
             key, subkey = jax.random.split(key)
-            om_p_states, om_v_states = opp_model_selfagent(
+            om_p_state, om_v_state = opp_model_selfagent(
                 subkey, p_states, v_states, om_p_states, om_v_states, 0
             )
-            p_copy[1:] = om_p_states[1:]
-            v_copy[1:] = om_v_states[1:]
+            p_copy[0] = om_p_state
+            v_copy[0] = om_v_state
 
         key, subkey = jax.random.split(key)
         init_scan_carry = (key, p_copy, v_copy, p_ref, v_ref, 1)
@@ -1635,9 +1623,9 @@ def play(
 
         # After all agents have updated once, we evaluate
         key, subkey = jax.random.split(key)
-        scores, fixed, _ = eval_progress(subkey, p_states, v_states)
+        scores, fixed_scores, _ = eval_progress(subkey, p_states, v_states)
         score_record.append(scores)
-        vs_fixed_strats_score_record.append(fixed)
+        vs_fixed_strats_score_record.append(fixed_scores)
 
         if (update_idx + 1) % args.print_every == 0:
             print("*" * 10)
@@ -1649,7 +1637,7 @@ def play(
                     f"  Agent {agent_i} vs fixed strats: ALLD={fixed_scores_agent_i[0]:.4f},
                       ALLC={fixed_scores_agent_i[1]:.4f}, TFT={fixed_scores_agent_i[2]:.4f}"
                 )
-                        
+
         if args.env == 'ipd' and args.inspect_ipd:
             inspect_ipd(p_states, v_states)
 
@@ -1657,15 +1645,11 @@ def play(
             now = datetime.datetime.now()
             checkpoints.save_checkpoint(
                 ckpt_dir=args.save_dir,
-                target=(
-                    p_states,
-                    v_states,
-                    score_record,
-                    vs_fixed_strats_score_record
-                ),
+                target=(p_states, v_states, score_record, vs_fixed_strats_score_record),
                 step=update_idx + 1,
                 prefix=f"checkpoint_{now.strftime('%Y-%m-%d_%H-%M')}_seed{args.seed}_epoch"
             )
+
     return score_record, vs_fixed_strats_score_record
 
 
