@@ -1548,8 +1548,8 @@ def play(key: jnp.ndarray,
     vs_fixed_strats_score_record = []
 
     # Create initial copies of the train states
-    p_states = copy_trainstates(trainstates_p)
-    v_states = copy_trainstates(trainstates_v)
+    p_after_outer_steps = copy_trainstates(trainstates_p)
+    v_after_outer_steps = copy_trainstates(trainstates_v)
 
     if use_opp_model:
         key, subkey = jax.random.split(key)
@@ -1557,7 +1557,7 @@ def play(key: jnp.ndarray,
 
     # Evaluate initial performance
     key, subkey = jax.random.split(key)
-    init_scores, fixed_scores, _ = eval_progress(subkey, p_states, v_states)
+    init_scores, fixed_scores, _ = eval_progress(subkey, p_after_outer_steps, v_after_outer_steps)
     score_record.append(init_scores)
     vs_fixed_strats_score_record.append(fixed_scores)
     print("Initial average scores across agents:", init_scores)
@@ -1566,47 +1566,34 @@ def play(key: jnp.ndarray,
     # Main training loop over update iterations
     for update_idx in range(args.n_update):
         # Create reference copies (for the KL penalty) that will remain unchanged during this update
-        p_ref = copy_trainstates(p_states)
-        v_ref = copy_trainstates(v_states)
+        p_ref = copy_trainstates(trainstates_p)
+        v_ref = copy_trainstates(trainstates_v)
 
-        # --- Update for agent 0 ---
-        p_copy = copy_trainstates(p_states)
-        v_copy = copy_trainstates(v_states)
-        
-        if use_opp_model:
-            key, subkey = jax.random.split(key)
-            # Update the opponent model for agent 0 if applicable
-            om_p_state, om_v_state = opp_model_selfagent(subkey, p_states, v_states, om_p_states, om_v_states, 0)
-            p_copy[0] = om_p_state
-            v_copy[0] = om_v_state
-
-        key, subkey = jax.random.split(key)
-        init_scan_state = (subkey, p_copy, v_copy, p_ref, v_ref, 0)
-        final_scan_state, _ = jax.lax.scan(one_outer_step_update_selfagent, init_scan_state, None, args.outer_steps)
-        p_copy, v_copy = final_scan_state[1], final_scan_state[2]
-
-        # --- Update for agents 1 ... (n_agents - 1) ---
-        for agent_i in range(1, args.n_agents):
-            p_working = copy_trainstates(p_states)
-            v_working = copy_trainstates(v_states)
+        # Loop over all agents (including agent 0) to perform their outer update.
+        for agent_i in range(args.n_agents):
+            # Make a working copy of the global states
+            p_working = copy_trainstates(trainstates_p)
+            v_working = copy_trainstates(trainstates_v)
+            
             if use_opp_model:
                 key, subkey = jax.random.split(key)
+                # Update the opponent model for the current agent if applicable
                 om_p_state, om_v_state = opp_model_selfagent(subkey, p_working, v_working, om_p_states, om_v_states, agent_i)
                 p_working[agent_i] = om_p_state
                 v_working[agent_i] = om_v_state
 
+            key, subkey = jax.random.split(key)
             init_scan_state = (subkey, p_working, v_working, p_ref, v_ref, agent_i)
             final_scan_state, _ = jax.lax.scan(one_outer_step_update_selfagent, init_scan_state, None, args.outer_steps)
-            # Update p_copy and v_copy with the results of the scan for agent_i
-            p_copy, v_copy = final_scan_state[1], final_scan_state[2]
+            p_working, v_working = final_scan_state[1], final_scan_state[2]
 
             # Overwrite the corresponding agent entry in the global state
-            p_states = p_copy
-            v_states = v_copy
+            p_after_outer_steps[agent_i] = p_working[agent_i]
+            v_after_outer_steps[agent_i] = v_working[agent_i]
 
-        # After all agents have updated once, we evaluate
+        # After all agents have updated once, evaluate
         key, subkey = jax.random.split(key)
-        scores, fixed_scores, _ = eval_progress(subkey, p_states, v_states)
+        scores, fixed_scores, _ = eval_progress(subkey, p_after_outer_steps, v_after_outer_steps)
         score_record.append(scores)
         vs_fixed_strats_score_record.append(fixed_scores)
 
@@ -1623,14 +1610,14 @@ def play(key: jnp.ndarray,
                 )
 
         if args.env == 'ipd' and args.inspect_ipd:
-            inspect_ipd(p_states, v_states)
+            inspect_ipd(p_after_outer_steps, v_after_outer_steps)
 
         # Save checkpoint if required
         if (update_idx + 1) % args.checkpoint_every == 0:
             now = datetime.datetime.now()
             checkpoints.save_checkpoint(
                 ckpt_dir=args.save_dir,
-                target=(p_states, v_states, score_record, vs_fixed_strats_score_record),
+                target=(p_after_outer_steps, v_after_outer_steps, score_record, vs_fixed_strats_score_record),
                 step=update_idx + 1,
                 prefix=f"checkpoint_{now.strftime('%Y-%m-%d_%H-%M')}_seed{args.seed}_epoch"
             )
