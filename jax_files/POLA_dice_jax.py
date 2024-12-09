@@ -454,30 +454,30 @@ def get_init_hidden_states():
 #              Environment Rollout Helpers (N-step scanning)                  #
 ###############################################################################
 
-@partial(jit, static_argnums=(9))
-def do_env_rollout(key, th1, th1_params, val1, val1_params, th2, th2_params, val2, val2_params, agent_for_state_history):
+@partial(jit, static_argnums=(3,))
+def do_env_rollout(key, p_states, v_states, agent_for_state_history):
     """
-    Performs a multi-step environment rollout for each of the batch_size parallel 
-    envs using a vmap of step() calls. Saves partial state history for the 
-    agent_of_interest (agent_for_state_history).
+    Performs a rollout for all parallel environments and returns:
+      - final_scan_carry: the final state from the JAX scan,
+      - aux: a tuple of outputs from env_step (which now has per–agent outputs),
+      - state_history: a list (stackable to [T, batch_size, obs_dim]) of observations.
+    
+    agent_for_state_history: the index of the agent whose “history” we will use
+      (e.g. to later run a policy forward on that trajectory).
     """
+    # Reset the environment for each of the batch_size parallel envs.
     keys = jax.random.split(key, args.batch_size + 1)
     key, env_subkeys = keys[0], keys[1:]
-    env_state, obsv = vec_env_reset(env_subkeys)
-    obs1 = obsv
-    obs2 = obsv
-    h_p1, h_p2, h_v1, h_v2 = get_init_hidden_states()
-    state_history = []
-    if agent_for_state_history == 2:
-        state_history.append(obs2)
-    else:
-        state_history.append(obs1)
+    env_state, obs = vec_env_reset(env_subkeys)  # obs shape: [batch_size, obs_dim]
 
     # state_history stores the initial observation for the agent of interest.
     # Additional observations from the rollout will be appended later. (strange but works)
-
-    init_scan_carry = (key, env_state, obs1, obs2, th1, th1_params, val1, val1_params,
-                       th2, th2_params, val2, val2_params, h_p1, h_v1, h_p2, h_v2)
+    state_history = [obs]
+    
+    hidden_p, hidden_v = get_init_hidden_states()
+    init_scan_carry = (key, env_state, obs, p_states, v_states, hidden_p, hidden_v)
+    
+    # Roll out the environment for rollout_len steps.
     final_scan_carry, aux = jax.lax.scan(env_step, init_scan_carry, None, args.rollout_len)
 
     return final_scan_carry, aux, state_history
