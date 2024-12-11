@@ -760,70 +760,56 @@ def out_lookahead(key, th1, th1_params, val1, val1_params,
 @jit
 def one_outer_step_objective_selfagent(
     key,
-    th1_copy, th1_copy_params,
-    val1_copy, val1_copy_params,
-    th2_copy, th2_copy_params,
-    val2_copy, val2_copy_params,
-    th_ref, val_ref,
-    self_agent=1
+    p_working: list,
+    v_working: list,
+    p_ref: list,      # reference policy TrainStates (for KL penalty)
+    v_ref: list,      # reference value TrainStates (for KL penalty)
+    agent_i: int
 ):
     """
-    Single outer-step objective for the specified `self_agent`.
-
-    Steps:
-      1) Run the inner step(s) for the *opponent* (other_agent).
-      2) Evaluate final objective from `self_agent`’s vantage point.
-
-    If self_agent=1:
-      - Opponent is agent=2
-      - Evaluate out_lookahead(... self_agent=1 ...)
-    If self_agent=2:
-      - Opponent is agent=1
-      - Evaluate out_lookahead(... self_agent=2 ...)
-
-    Returns (objective, state_hist).
+    Computes the outer objective for `agent_i` under POLA, by first
+    doing inner-step updates for each other agent j != i, then
+    evaluating agent_i's final objective (the 'out_lookahead').
+    Returns (objective, state_hist) or similar.
     """
 
-    # Identify opponent
-    other_agent = 2 if (self_agent == 1) else 1
+    updated_p_working = p_working.copy()
+    updated_v_working = v_working.copy()
 
-    # 1) Inner step for the opponent
-    key, subkey = jax.random.split(key)
-    updated_th_opp, updated_val_opp = inner_steps_plus_update_otheragent(
-        subkey,
-        th1_copy, th1_copy_params,
-        val1_copy, val1_copy_params,
-        th2_copy, th2_copy_params,
-        val2_copy, val2_copy_params,
-        # The old (reference) for the *opponent*:
-        th2_copy if other_agent == 2 else th1_copy,
-        val2_copy if other_agent == 2 else val1_copy,
-        other_agent=other_agent
+    # 1) For each other agent j != i, run the "inner step" K times
+    #    so that agent j does a proximal update (best response) 
+    #    while everyone else (including i) is fixed.
+    for j in range(n_agents):
+        if j == agent_i:
+            continue
+        # inner_steps_plus_update_otheragent is your function that:
+        # - rolls out the environment once,
+        # - computes the objective for agent j,
+        # - includes a KL penalty w.r.t. old params, etc.
+        # - performs K gradient steps updating only p_working[j], v_working[j].
+        key, subkey = jax.random.split(key)
+        updated_p_j, updated_v_j = inner_steps_plus_update_otheragent(
+            subkey,
+            p_working, v_working,
+            p_ref, v_ref, # old references for agent j
+            other_agent=j
+        )
+        # Store the updated TrainState for agent j back into the arrays
+        updated_p_working[j] = updated_p_j
+        updated_v_working[j] = updated_v_j
+
+    # 2) Now evaluate the "outer" objective from agent_i's perspective,
+    #    given that all opponents j != i have just updated themselves.
+    #    This is similar to the 2-agent out_lookahead, but generalized
+    #    to n-agents. Typically it does a single environment rollout
+    #    where agent_i’s policy is used, the updated opponents are used,
+    #    and a KL penalty to p_ref is included.
+    objective, state_hist = out_lookahead(
+        key,
+        updated_p_working, updated_v_working,  # the newly updated set of all agents
+        p_ref, v_ref,
+        self_agent=agent_i
     )
-
-    # 2) Evaluate final objective from self_agent's perspective
-    if self_agent == 1:
-        # The updated opponent is agent 2
-        objective, state_hist = out_lookahead(
-            key,
-            th1_copy, th1_copy_params,
-            val1_copy, val1_copy_params if use_baseline else None,
-            updated_th_opp, updated_th_opp.params,
-            updated_val_opp, updated_val_opp.params if use_baseline else None,
-            th_ref, val_ref,
-            self_agent=1
-        )
-    else:
-        # self_agent == 2 => The updated opponent is agent 1
-        objective, state_hist = out_lookahead(
-            key,
-            updated_th_opp, updated_th_opp.params,
-            updated_val_opp, updated_val_opp.params if use_baseline else None,
-            th2_copy, th2_copy_params,
-            val2_copy, val2_copy_params if use_baseline else None,
-            th_ref, val_ref,
-            self_agent=2
-        )
 
     return objective, state_hist
 
