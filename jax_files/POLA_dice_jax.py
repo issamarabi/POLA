@@ -835,54 +835,45 @@ def one_outer_step_objective_selfagent(
 @jit
 def one_outer_step_update_selfagent(scan_carry, _):
     """
-    For one outer-step update of the specified `self_agent`:
-      1) Compute gradient wrt that agent's policy/value,
-      2) Apply the gradient,
-      3) Return updated TrainStates for that agent.
+    Inside a JAX.scan over M=outer_steps, we do:
+      1) compute grad of the 'one_outer_step_objective_selfagent'
+         wrt agent_i's policy & value parameters,
+      2) apply those grads to p_working[i], v_working[i].
 
-    We use one_outer_step_objective_selfagent(... self_agent=...) inside.
-
-    Returns updated_scan_carry and state_hist.
+    scan_carry = (key, p_working, v_working, p_ref, v_ref, agent_i)
     """
-    (key, th1_copy, val1_copy, th2_copy, val2_copy, th_ref, val_ref, self_agent) = scan_carry
-    key, subkey = jax.random.split(key)
+    (key, p_working, v_working, p_ref, v_ref, agent_i) = scan_carry
 
-    argnums = [2, 4] if self_agent == 1 else [6, 8]
-    grad_fn = jax.grad(one_outer_step_objective_selfagent, argnums=argnums, has_aux=True)
-    (grad_th, grad_val), state_hist = grad_fn(
-        subkey,
-        th1_copy, th1_copy.params,
-        val1_copy, val1_copy.params,
-        th2_copy, th2_copy.params,
-        val2_copy, val2_copy.params,
-        th_ref, val_ref,
-        self_agent=self_agent
+    # We only differentiate wrt the "self_agent" i's policy and value.
+    # If p_working / v_working are lists, we need `argnums` that index 
+    # exactly agent_i’s portion of that list. The simplest approach:
+    #   - treat p_working, v_working as single PyTrees,
+    #   - define a custom "mask" so that only p_working[i], v_working[i]
+    #     get gradient updates while the others are stop_gradient.
+    # Or keep it simpler by passing them as single objects if you do partial_jax, etc.
+
+    grad_fn = jax.grad(one_outer_step_objective_selfagent, argnums=(1,2), has_aux=True)
+
+    # Evaluate the objective & get grads wrt p_working, v_working
+    (grads_p, grads_v), state_hist = grad_fn(
+        key, p_working, v_working, p_ref, v_ref, agent_i
     )
 
-    th_copy_agent = th1_copy if self_agent == 1 else th2_copy
-    val_copy_agent = val1_copy if self_agent == 1 else val2_copy
+    # Now, `grads_p` and `grads_v` have the same structure as `p_working` and
+    # `v_working`. We only want to apply them to the self_agent's entries
+    # p_working[agent_i], v_working[agent_i]. So we do something like:
 
-    th_copy_updated = th_copy_agent.apply_gradients(grads=grad_th)
-    val_copy_updated = (val_copy_agent.apply_gradients(grads=grad_val)
-                        if use_baseline else val_copy_agent)
+    # For policy
+    new_policy_i = p_working[agent_i].apply_gradients(grads=grads_p[agent_i])
+    p_working = p_working.copy()
+    p_working[agent_i] = new_policy_i
 
-    if self_agent == 1:
-        updated_scan_carry = (
-            key,
-            th_copy_updated, val_copy_updated,
-            th2_copy, val2_copy,
-            th_ref, val_ref,
-            self_agent
-        )
-    else:
-        updated_scan_carry = (
-            key,
-            th1_copy, val1_copy,
-            th_copy_updated, val_copy_updated,
-            th_ref, val_ref,
-            self_agent
-        )
+    # For value function (if you're using a baseline)
+    new_value_i = v_working[agent_i].apply_gradients(grads=grads_v[agent_i])
+    v_working = v_working.copy()
+    v_working[agent_i] = new_value_i
 
+    updated_scan_carry = (key, p_working, v_working, p_ref, v_ref, agent_i)
     return updated_scan_carry, state_hist
 
 
