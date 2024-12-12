@@ -707,55 +707,73 @@ def inner_steps_plus_update_otheragent(
 #    Outer-Loop Minimization for the "Self" Agent (POLA Outer Step)           #
 ###############################################################################
 
-@partial(jit, static_argnums=(11))
-def out_lookahead(key, th1, th1_params, val1, val1_params,
-                  th2, th2_params, val2, val2_params,
-                  old_th, old_val, self_agent=1):
+@partial(jit, static_argnums=(5,))
+def out_lookahead(key, p_states, v_states, p_ref, v_ref, self_agent):
     """
-    The "outer" objective for self_agent. We do a rollout, sum the DiCE objective, 
-    add a KL penalty wrt. old parameters (POLA). 
+    The "outer" objective for self_agent in the n-agent setting.
+    p_states, v_states: lists (length = n_agents) of current TrainStates.
+    p_ref, v_ref: the reference (old) TrainState for self_agent (a single object).
+    self_agent: index of the agent for which we evaluate the outer objective.
+    
+    Returns:
+      (objective + outer KL penalty, state_history)
     """
-    final_carry, aux, partial_state_hist = do_env_rollout(
-        key, th1, th1_params, val1, val1_params,
-        th2, th2_params, val2, val2_params, agent_for_state_history=self_agent)
+    # Run an environment rollout. do_env_rollout returns:
+    #   - final_scan_carry: final environment and RNN state information
+    #   - aux: a tuple of per-time-step outputs (each with a "batch" of outputs for every agent)
+    #   - state_history: a list of observations from the rollout (for the agent of interest)
+    final_carry, aux, state_history = do_env_rollout(key, p_states, v_states, agent_for_state_history=self_agent)
+    
+    # Unpack the rollout final carry and auxiliary outputs.
+    # (final_scan_carry might contain, e.g., (key_final, env_state, obs, p_states_roll, v_states_roll, hidden_p, hidden_v))
+    key_final, env_state, obs, p_states_roll, v_states_roll, hidden_p, hidden_v = final_carry
+    (softmax_arr, obs_next, log_probs_arr, values_arr, rewards_arr,
+     actions_arr, logits_arr, env_info) = aux
 
-    aux1, aux2, aux_info = aux
-    (key_final, env_state, obs1, obs2,
-     _, _, _, _, _, _, _, _, h_p1, h_v1, h_p2, h_v2) = final_carry
+    # Extract the rollout data for the self agent.
+    agent_log_probs = log_probs_arr[:, :, self_agent]  # [T, batch_size]
+    agent_values    = values_arr[:, :, self_agent]       # [T, batch_size]
+    agent_rewards   = rewards_arr[:, :, self_agent]      # [T, batch_size]
 
-    if self_agent == 1:
-        cat_probs1_list, obs1_list, lp1_list, lp2_list, v1_list, r1_list, a1_list, a2_list = aux1
-        partial_state_hist.extend(obs1_list)
-        # final step val
-        key_final, subkey = jax.random.split(key_final, 2)
-        act_args1 = (subkey, obs1, th1, th1_params, val1, val1_params, h_p1, h_v1)
-        _, (a1_end, lp1_end, v1_end, _, _, _, _) = act(act_args1, None)
-        end_state_v = v1_end
-        objective = dice_objective_plus_value_loss(lp1_list, lp2_list, r1_list, v1_list, end_state_v)
-        # Collect probabilities, old probabilities
-        key_final, subkey = jax.random.split(key_final, 2)
-        self_pol_probs = get_policies_for_states(subkey, th1, th1_params, val1, val1_params, partial_state_hist)
-        self_pol_probs_old = get_policies_for_states(subkey, old_th, old_th.params,
-                                                     old_val, old_val.params, partial_state_hist)
-    else:
-        cat_probs2_list, obs2_list, lp2_list, lp1_list, v2_list, r2_list, a2_list, a1_list = aux2
-        partial_state_hist.extend(obs2_list)
-        key_final, subkey = jax.random.split(key_final, 2)
-        act_args2 = (subkey, obs2, th2, th2_params, val2, val2_params, h_p2, h_v2)
-        _, (a2_end, lp2_end, v2_end, _, _, _, _) = act(act_args2, None)
-        end_state_v = v2_end
-        objective = dice_objective_plus_value_loss(lp2_list, lp1_list, r2_list, v2_list, end_state_v)
-        key_final, subkey = jax.random.split(key_final, 2)
-        self_pol_probs = get_policies_for_states(subkey, th2, th2_params, val2, val2_params, partial_state_hist)
-        self_pol_probs_old = get_policies_for_states(subkey, old_th, old_th.params,
-                                                     old_val, old_val.params, partial_state_hist)
+    # To get the terminal value estimate for self_agent, perform one more forward pass:
+    act_carry = (key_final, obs, p_states, v_states, hidden_p, hidden_v)
+    _, aux_act = act(act_carry, None)
+    # aux_act is a tuple (actions, log_probs, values, hidden_p, hidden_v, softmax, logits)
+    end_state_value = aux_act[2][:, self_agent]  # [batch_size]
 
+    # Compute the opponents' joint log-probability:
+    # Remove self_agent’s log-probs and sum over the others.
+    other_log_probs = jnp.sum(jnp.delete(log_probs_arr, self_agent, axis=2), axis=2)  # [T, batch_size]
+
+    # Compute the DiCE+value objective for self_agent.
+    objective = dice_objective_plus_value_loss(
+        agent_log_probs,    # self log-probs for self_agent
+        other_log_probs,    # sum of log-probs for all opponents
+        agent_rewards,      # rewards for self_agent
+        agent_values,       # value estimates for self_agent over the rollout
+        end_state_value     # terminal value estimate
+    )
+
+    # Next, compute the KL penalty term.
+    # Convert the collected state history (a list) into an array of shape [T, batch_size, obs_dim]
+    state_hist_arr = jnp.stack(state_history, axis=0)
+    key_next, subkey = jax.random.split(key_final)
+    # Evaluate current policy probabilities on the rollout:
+    current_pol_probs = get_policies_for_states(subkey, p_states, v_states, state_hist_arr)
+    # current_pol_probs has shape [T, batch_size, n_agents, action_size]; extract self_agent's probabilities:
+    current_agent_probs = current_pol_probs[:, :, self_agent, :]
+    
+    # Get the reference (old) probabilities for self_agent.
+    current_pol_probs_old = get_policies_for_states(subkey, p_ref, v_ref, state_hist_arr)
+    current_agent_probs_old = current_pol_probs_old[:, :, self_agent, :]
+
+    # Compute the KL divergence between the current and reference policies.
     if args.rev_kl:
-        kl_div_term = rev_kl_div_jax(self_pol_probs, self_pol_probs_old)
+        kl_penalty = rev_kl_div_jax(current_agent_probs, current_agent_probs_old)
     else:
-        kl_div_term = kl_div_jax(self_pol_probs, self_pol_probs_old)
+        kl_penalty = kl_div_jax(current_agent_probs, current_agent_probs_old)
 
-    return objective + args.outer_beta * kl_div_term, partial_state_hist
+    return objective + args.outer_beta * kl_penalty, state_history
 
 @jit
 def one_outer_step_objective_selfagent(
