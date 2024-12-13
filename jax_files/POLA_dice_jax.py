@@ -620,88 +620,52 @@ def inner_step_get_grad_otheragent(scan_carry, _):
     return new_scan_carry, None
 
 @jit
-def inner_steps_plus_update_otheragent(
-    key,
-    th1, th1_params,
-    val1, val1_params,
-    th2, th2_params,
-    val2, val2_params,
-    old_th, old_val,
-    other_agent=1
-):
+def inner_steps_plus_update_otheragent(key, p_states, v_states, p_ref, v_ref, other_agent):
+    """Inner-loop updates for a single agent.
+
+    Updates `other_agent`'s policy and value (if applicable) for `args.inner_steps` using `inner_step_get_grad_otheragent`.
+    Initializes a fresh TrainState with inner-loop learning rates.
+
+    Parameters:
+      - key: PRNGKey.
+      - p_states: list of current policy TrainStates for all agents.
+      - v_states: list of current value TrainStates for all agents.
+      - p_ref: list of reference policy TrainStates (for KL penalty) for all agents.
+      - v_ref: list of reference value TrainStates (for KL penalty) for all agents.
+      - other_agent: index of agent to update.
+
+    Returns:
+      Updated TrainState for `other_agent`.
     """
-    Runs args.inner_steps of inner-loop updates for 'other_agent'.
-    Returns updated (th, val) for the agent we are updating.
+    # Create working copies for all agents.
+    # For the agent to be updated, replace its TrainState with a freshly created one
+    # using the inner-loop optimizer (here, SGD with learning rate args.lr_in for policy and args.lr_v for value).
+    new_p_states = p_states.copy()
+    new_v_states = v_states.copy()
 
-    If other_agent == 1:
-      - We create a fresh TrainState for agent 1 (th1, val1) and update it.
-      - Agent 2's parameters remain fixed during these inner updates.
-    If other_agent == 2:
-      - We create a fresh TrainState for agent 2 (th2, val2) and update it.
-      - Agent 1 remains fixed.
-    """
-
-    # 1) Create TrainState "prime" for the agent to be updated
-    if other_agent == 1:
-        th_prime = TrainState.create(
-            apply_fn=th1.apply_fn,
-            params=th1_params,
-            tx=optax.sgd(learning_rate=args.lr_in)
-        )
-        val_prime = (TrainState.create(
-            apply_fn=val1.apply_fn,
-            params=val1_params,
-            tx=optax.sgd(learning_rate=args.lr_v))
-            if use_baseline else val1
-        )
-
-        # 2) Build initial carry
-        carry_init = (
-            key,
-            th_prime, th_prime.params,
-            val_prime, val_prime.params,
-            th2, th2_params,
-            val2, val2_params,
-            old_th, old_val
-        )
-
-    else:
-        # other_agent == 2
-        th_prime = TrainState.create(
-            apply_fn=th2.apply_fn,
-            params=th2_params,
-            tx=optax.sgd(learning_rate=args.lr_in)
-        )
-        val_prime = (TrainState.create(
-            apply_fn=val2.apply_fn,
-            params=val2_params,
-            tx=optax.sgd(learning_rate=args.lr_v))
-            if use_baseline else val2
-        )
-
-        carry_init = (
-            key,
-            th1, th1_params,
-            val1, val1_params,
-            th_prime, th_prime.params,
-            val_prime, val_prime.params,
-            old_th, old_val
-        )
-
-    # 3) Run `args.inner_steps` of updates via a single scan
-    final_carry, _ = jax.lax.scan(
-        inner_step_get_grad_otheragent,
-        carry_init,
-        None,
-        length=args.inner_steps
+    new_p_states[other_agent] = TrainState.create(
+        apply_fn=p_states[other_agent].apply_fn,
+        params=p_states[other_agent].params,
+        tx=optax.sgd(learning_rate=args.lr_in)
     )
+    if use_baseline:
+        new_v_states[other_agent] = TrainState.create(
+            apply_fn=v_states[other_agent].apply_fn,
+            params=v_states[other_agent].params,
+            tx=optax.sgd(learning_rate=args.lr_v)
+        )
 
-    # 4) Extract final updated policy/value for the agent-of-interest
-    if other_agent == 1:
-        (_, th_f, val_f, _, _, _, _, _) = final_carry
-    else:
-        (_, _, _, th_f, val_f, _, _, _) = final_carry
-    return th_f, val_f
+    # Pack the working copies and the reference copies into the scan carry.
+    carry_init = (key, new_p_states, new_v_states, p_ref, v_ref, other_agent)
+
+    # Run the inner-loop updates for `args.inner_steps`.
+    final_carry, _ = jax.lax.scan(inner_step_get_grad_otheragent, carry_init, None, length=args.inner_steps)
+
+    # final_carry is (key, updated_p_states, updated_v_states, p_ref, v_ref, other_agent)
+    updated_p_states = final_carry[1]
+    updated_v_states = final_carry[2]
+
+    return updated_p_states[other_agent], updated_v_states[other_agent]
 
 ###############################################################################
 #    Outer-Loop Minimization for the "Self" Agent (POLA Outer Step)           #
