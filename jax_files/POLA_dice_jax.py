@@ -560,63 +560,33 @@ def in_lookahead(key, th1, th1_params, val1, val1_params,
 @jit
 def inner_step_get_grad_otheragent(scan_carry, _):
     """
-    Single update step for the 'other_agent' in the inner lookahead objective.
-    - We differentiate and update only that agent's policy/value params.
-    - The other agent's params stay fixed.
+    Single inner-loop update step for the specified "other agent" (by index) in the n-agent setting.
+    We compute the gradient of the in_lookahead objective (which runs a rollout and adds a KL penalty)
+    with respect to the parameters of the agent indexed by `other_agent`, and update only that agent’s
+    policy and (if using a baseline) value TrainState. The other agents’ TrainStates remain fixed.
 
-    scan_carry is a tuple:
-      (key, th1, th1_params, val1, val1_params,
-       th2, th2_params, val2, val2_params,
-       old_th, old_val, other_agent)
+    Returns a new tuple with the updated lists for policies and value functions.
     """
-    (key, th1, th1_params, val1, val1_params,
-     th2, th2_params, val2, val2_params,
-     old_th, old_val, other_agent) = scan_carry
-
-    # Decide which arguments we differentiate wrt
-    # agent 1 => argnums = [2,4]; agent 2 => argnums = [6,8]
-    argnums = [2, 4] if other_agent == 1 else [6, 8]
-    grad_fn = jax.grad(in_lookahead, argnums=argnums)
-
+    (key, p_states, v_states, p_ref, v_ref, other_agent) = scan_carry
     key, subkey = jax.random.split(key)
-    grad_th, grad_val = grad_fn(
-        subkey,
-        th1, th1_params,
-        val1, val1_params,
-        th2, th2_params,
-        val2, val2_params,
-        old_th, old_val,
-        other_agent=other_agent
+
+    # Compute gradients with respect to the lists of policy and value states.
+    grad_fn = jax.grad(in_lookahead, argnums=(1, 2), has_aux=True)
+    (grads_p, grads_v), _ = grad_fn(
+        subkey, p_states, v_states, p_ref, v_ref, other_agent
     )
 
-    if other_agent == 1:
-        th1_updated = th1.apply_gradients(grads=grad_th)
-        val1_updated = val1.apply_gradients(grads=grad_val) if use_baseline else val1
+    # Create new (updated) copies of the TrainState lists.
+    # Update only the entry at index "other_agent".
+    new_p_states = p_states.copy()
+    new_v_states = v_states.copy()
 
-        new_scan_carry = (
-            key,
-            th1_updated, th1_updated.params,
-            val1_updated, val1_updated.params,
-            th2, th2_params,
-            val2, val2_params,
-            old_th, old_val,
-            other_agent
-        )
-    else:
-        # other_agent == 2
-        th2_updated = th2.apply_gradients(grads=grad_th)
-        val2_updated = val2.apply_gradients(grads=grad_val) if use_baseline else val2
+    new_p_states[other_agent] = p_states[other_agent].apply_gradients(grads=grads_p[other_agent])
+    if use_baseline:
+        new_v_states[other_agent] = v_states[other_agent].apply_gradients(grads=grads_v[other_agent])
+    # Otherwise, leave the value state unchanged.
 
-        new_scan_carry = (
-            key,
-            th1, th1_params,
-            val1, val1_params,
-            th2_updated, th2_updated.params,
-            val2_updated, val2_updated.params,
-            old_th, old_val,
-            other_agent
-        )
-
+    new_scan_carry = (key, new_p_states, new_v_states, p_ref, v_ref, other_agent)
     return new_scan_carry, None
 
 @jit
