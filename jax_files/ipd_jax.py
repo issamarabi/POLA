@@ -106,16 +106,15 @@ class IPD:
         rewards_array = jnp.vectorize(per_agent_reward)(actions_array)
         rewards_tuple = tuple(rewards_array)  # e.g. (r1, r2, ..., rN)
 
-        # 4) Construct the new (3*N,)-dim state vector by one-hotting each agent's last action
-        #    Defect=0 => [1,0,0], Cooperate=1 => [0,1,0]. We never reuse the "start" slot after the first step.
-        new_onehots = []
-        for a in actions_array:
-            if a == 0:
-                new_onehots.append(jnp.array([1., 0., 0.]))  # Defect
-            else:
-                new_onehots.append(jnp.array([0., 1., 0.]))  # Cooperate
-
-        new_state = jnp.concatenate(new_onehots, axis=0)
+        # Construct the new state using vectorized one-hot encoding.
+        # For defect (0): [1., 0., 0.], for cooperate (1): [0., 1., 0.].
+        new_onehots = jnp.where(
+            actions_array[:, None] == 0,
+            jnp.array([1., 0., 0.]),
+            jnp.array([0., 1., 0.])
+        )
+        # Concatenate along axis 0 to form the new state of shape (3 * n_agents,)
+        new_state = jnp.concatenate([new_onehots[i] for i in range(new_onehots.shape[0])], axis=0)
 
         # 5) In this setup, each agent sees the same "observation", i.e. the global last-action vector.
         observation = new_state
