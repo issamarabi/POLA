@@ -67,7 +67,7 @@ class IPD:
         """
         return self.initial_state, self.initial_state
 
-    def step(self, unused_state, *actions, unused_key=None):
+    def step(self, unused_state, actions_array, unused_key=None):
         """
         Execute a step in the game based on the actions of N agents.
 
@@ -87,7 +87,7 @@ class IPD:
         """
 
         # 1) Convert the *actions tuple into an array of shape (N,).
-        actions_array = jnp.array(actions, dtype=jnp.int32)  # shape = (N,)
+        # actions_array = jnp.array(actions, dtype=jnp.int32)  # shape = (N,)
 
         # 2) Count the number of cooperators.
         c = jnp.sum(actions_array)  # shape=(), sum of 0/1 actions
