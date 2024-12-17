@@ -1556,7 +1556,7 @@ def play(key: jnp.ndarray,
                 print(f"  Agent {agent_i} score: {scores[agent_i]:.4f}")
                 fixed_scores_agent_i = fixed_scores[agent_i]
                 print(
-                    f"  Agent {agent_i} vs fixed strats: ALLD={fixed_scores_agent_i[0]:.4f},
+                    f"  Agent {agent_i} vs fixed strats: ALLD={fixed_scores_agent_i[0]:.4f}, \
                       ALLC={fixed_scores_agent_i[1]:.4f}, TFT={fixed_scores_agent_i[2]:.4f}"
                 )
 
