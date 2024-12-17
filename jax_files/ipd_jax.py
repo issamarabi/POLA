@@ -104,7 +104,6 @@ class IPD:
             return jnp.where(a == 1, base - 1.0, base)
 
         rewards_array = jnp.vectorize(per_agent_reward)(actions_array)
-        rewards_tuple = tuple(rewards_array)  # e.g. (r1, r2, ..., rN)
 
         # Construct the new state using vectorized one-hot encoding.
         # For defect (0): [1., 0., 0.], for cooperate (1): [0., 1., 0.].
@@ -119,4 +118,4 @@ class IPD:
         # 5) In this setup, each agent sees the same "observation", i.e. the global last-action vector.
         observation = new_state
 
-        return new_state, observation, rewards_tuple, None
+        return new_state, observation, rewards_array, None
