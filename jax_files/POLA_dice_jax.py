@@ -409,8 +409,8 @@ def get_policies_for_states(
     T = obs_hist.shape[0]  # rollout_len
 
     # Initialize hidden states for each agent: shape [batch_size, hidden_size]
-    hidden_ps = [jnp.zeros((args.batch_size, args.hidden_size)) for _ in range(n_agents)]
-    hidden_vs = [jnp.zeros((args.batch_size, args.hidden_size)) for _ in range(n_agents)] if use_baseline else [None]*n_agents
+    hidden_ps = jnp.zeros((n_agents, args.batch_size, args.hidden_size))
+    hidden_vs = jnp.zeros((n_agents, args.batch_size, args.hidden_size)) if use_baseline else None
 
     key, subkey = jax.random.split(key)
     init_scan_carry = (subkey, trainstates_p, trainstates_v, hidden_ps, hidden_vs)
@@ -446,7 +446,7 @@ def get_init_hidden_states():
     Returns list of hidden states for each agent's policy (and value) RNN
     """
     hidden_p = jnp.array([jnp.zeros((args.batch_size, args.hidden_size)) for _ in range(args.n_agents)])
-    hidden_v = jnp.array([jnp.zeros((args.batch_size, args.hidden_size)) if use_baseline else None for _ in range(args.n_agents)], dtype=object)
+    hidden_v = jnp.array([jnp.zeros((args.batch_size, args.hidden_size)) if use_baseline else None for _ in range(args.n_agents)])
     return hidden_p, hidden_v
 
 
