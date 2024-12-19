@@ -454,7 +454,7 @@ def get_init_hidden_states():
 #              Environment Rollout Helpers (N-step scanning)                  #
 ###############################################################################
 
-@partial(jit, static_argnums=(3,))
+@jit
 def do_env_rollout(key, p_states, v_states, agent_for_state_history):
     """
     Performs a rollout for all parallel environments and returns:
@@ -611,7 +611,7 @@ def inner_step_get_grad_otheragent(scan_carry, _):
     new_scan_carry = (key, new_p_states, new_v_states, p_ref, v_ref, other_agent)
     return new_scan_carry, None
 
-@jit
+@partial(jit, static_argnums=(5,))
 def inner_steps_plus_update_otheragent(key, p_states, v_states, p_ref, v_ref, other_agent):
     """Inner-loop updates for a single agent.
 
@@ -663,7 +663,7 @@ def inner_steps_plus_update_otheragent(key, p_states, v_states, p_ref, v_ref, ot
 #    Outer-Loop Minimization for the "Self" Agent (POLA Outer Step)           #
 ###############################################################################
 
-@partial(jit, static_argnums=(5,))
+@jit
 def out_lookahead(key, p_states, v_states, p_ref, v_ref, self_agent):
     """
     The "outer" objective for self_agent in the n-agent setting.
