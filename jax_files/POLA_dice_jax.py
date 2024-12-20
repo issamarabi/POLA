@@ -501,19 +501,36 @@ def rev_kl_div_jax(curr, target):
     """
     return (curr * (jnp.log(curr) - jnp.log(target))).sum(axis=-1).mean()
 
-@partial(jit, static_argnums=(5,))
-def in_lookahead(key, p_states, v_states, p_ref, v_ref, other_agent):
+@partial(jit, static_argnums=(7,))
+def in_lookahead(key,
+                 p_i_params,     # float params for the "other_agent"
+                 v_i_params,     # float params for the "other_agent"
+                 p_states,       # TrainStates for *all* agents, but we won't differentiate w.r.t. the others
+                 v_states,
+                 p_ref,
+                 v_ref,
+                 other_agent):
     """
     Inner lookahead for the agent specified by `other_agent`.
+
+    *Only* p_i_params and v_i_params are treated as differentiable.
     
     Returns:
       The inner objective computed from a rollout plus an inner KL penalty.
     """
+    # Rebuild local copies so that the 'other_agent' has the p_i_params, v_i_params,
+    # while other agents' parameters remain fixed (no grads).
+    p_states = p_states.copy()
+    v_states = v_states.copy()
+    p_states[other_agent] = p_states[other_agent].replace(params=p_i_params)
+    v_states[other_agent] = v_states[other_agent].replace(params=v_i_params)
+
     # Run a rollout that returns:
     #   - final_scan_carry: a tuple including the final observation and current hidden states,
     #   - aux: a tuple of per–time step outputs (each with shape [batch_size, n_agents, ...]),
     #   - state_history: a list of observations (for the agent of interest) from the rollout.
-    final_carry, aux, state_history = do_env_rollout(key, p_states, v_states, agent_for_state_history=other_agent)
+    final_carry, aux, state_history = do_env_rollout(key, p_states, v_states, other_agent)
+
     # Unpack the final carry from the rollout.
     key_final, env_state, obs, p_states_roll, v_states_roll, hidden_p, hidden_v = final_carry
     # Unpack; here each array has the second axis indexing agents.
@@ -577,7 +594,7 @@ def in_lookahead(key, p_states, v_states, p_ref, v_ref, other_agent):
     else:
         kl_penalty = kl_div_jax(current_agent_probs, current_agent_probs_old)
 
-    return objective_inner + args.inner_beta * kl_penalty
+    return objective_inner + args.inner_beta * kl_penalty, None
 
 @jit
 def inner_step_get_grad_otheragent(scan_carry, _):
