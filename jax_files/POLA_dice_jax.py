@@ -596,37 +596,38 @@ def in_lookahead(key,
 
     return objective_inner + args.inner_beta * kl_penalty, None
 
-@jit
-def inner_step_get_grad_otheragent(scan_carry, _):
+@partial(jit, static_argnums=(2,))
+def inner_step_get_grad_otheragent(carry, _, other_agent):
     """
-    Single inner-loop update step for the specified "other agent" (by index) in the n-agent setting.
-    We compute the gradient of the in_lookahead objective (which runs a rollout and adds a KL penalty)
-    with respect to the parameters of the agent indexed by `other_agent`, and update only that agent’s
-    policy and (if using a baseline) value TrainState. The other agents’ TrainStates remain fixed.
-
-    Returns a new tuple with the updated lists for policies and value functions.
+    Single inner-loop update for `other_agent`. We only differentiate w.r.t. 
+    that agent's p_i_params, v_i_params.
     """
-    (key, p_states, v_states, p_ref, v_ref, other_agent) = scan_carry
+    (key, p_states, v_states, p_ref, v_ref) = carry
     key, subkey = jax.random.split(key)
 
-    # Compute gradients with respect to the lists of policy and value states.
+    # Extract the float params for this agent.
+    p_i_params = p_states[other_agent].params
+    v_i_params = v_states[other_agent].params
+
     grad_fn = jax.grad(in_lookahead, argnums=(1, 2), has_aux=True)
     (grads_p, grads_v), _ = grad_fn(
-        subkey, p_states, v_states, p_ref, v_ref, other_agent
+        subkey,
+        p_i_params,
+        v_i_params,
+        p_states, v_states,
+        p_ref, v_ref,
+        other_agent
     )
 
-    # Create new (updated) copies of the TrainState lists.
-    # Update only the entry at index "other_agent".
     new_p_states = p_states.copy()
     new_v_states = v_states.copy()
 
-    new_p_states[other_agent] = p_states[other_agent].apply_gradients(grads=grads_p[other_agent])
+    new_p_states[other_agent] = p_states[other_agent].apply_gradients(grads=grads_p)
     if use_baseline:
-        new_v_states[other_agent] = v_states[other_agent].apply_gradients(grads=grads_v[other_agent])
-    # Otherwise, leave the value state unchanged.
+        new_v_states[other_agent] = v_states[other_agent].apply_gradients(grads=grads_v)
 
-    new_scan_carry = (key, new_p_states, new_v_states, p_ref, v_ref, other_agent)
-    return new_scan_carry, None
+    new_carry = (key, new_p_states, new_v_states, p_ref, v_ref)
+    return new_carry, None
 
 @partial(jit, static_argnums=(5,))
 def inner_steps_plus_update_otheragent(key, p_states, v_states, p_ref, v_ref, other_agent):
