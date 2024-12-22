@@ -656,22 +656,20 @@ def inner_steps_plus_update_otheragent(key, p_states, v_states, p_ref, v_ref, ot
     new_p_states[other_agent] = TrainState.create(
         apply_fn=p_states[other_agent].apply_fn,
         params=p_states[other_agent].params,
-        tx=optax.sgd(learning_rate=args.lr_in)
+        tx=INNER_OPTIMIZER_P   # Use the pre-constructed optimizer
     )
     if use_baseline:
         new_v_states[other_agent] = TrainState.create(
             apply_fn=v_states[other_agent].apply_fn,
             params=v_states[other_agent].params,
-            tx=optax.sgd(learning_rate=args.lr_v)
+            tx=INNER_OPTIMIZER_V 
         )
 
-    # Pack the working copies and the reference copies into the scan carry.
-    carry_init = (key, new_p_states, new_v_states, p_ref, v_ref, other_agent)
-
-    # Run the inner-loop updates for `args.inner_steps`.
-    final_carry, _ = jax.lax.scan(inner_step_get_grad_otheragent, carry_init, None, length=args.inner_steps)
-
-    # final_carry is (key, updated_p_states, updated_v_states, p_ref, v_ref, other_agent)
+    # Pack the working carry without the agent index.
+    carry_init = (key, new_p_states, new_v_states, p_ref, v_ref)
+    # Pass `other_agent` as a static argument to inner_step_get_grad_otheragent.
+    final_carry, _ = jax.lax.scan(lambda carry, _: inner_step_get_grad_otheragent(carry, _, other_agent),
+                                  carry_init, None, length=args.inner_steps)
     updated_p_states = final_carry[1]
     updated_v_states = final_carry[2]
 
