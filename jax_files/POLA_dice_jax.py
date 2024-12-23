@@ -750,43 +750,74 @@ def out_lookahead(key, p_states, v_states, p_ref, v_ref, self_agent):
 @jit
 def one_outer_step_objective_selfagent(
     key,
-    p_working: list,
-    v_working: list,
-    p_ref: list,      # reference policy TrainStates (for KL penalty)
-    v_ref: list,      # reference value TrainStates (for KL penalty)
-    agent_i: int
+    p_i_params,   # Differentiable parameters for agent_i's policy
+    v_i_params,   # Differentiable parameters for agent_i's value network
+    p_working: list,  # Full list of policy TrainStates (for all agents)
+    v_working: list,  # Full list of value TrainStates (for all agents)
+    p_ref: list,      # Reference TrainStates for policies (used in KL penalty)
+    v_ref: list,      # Reference TrainStates for values (used in KL penalty)
+    agent_i: int      # The index of the "self" agent (the one being updated)
 ):
-    """
-    Computes the outer objective for `agent_i` under POLA, by first
-    doing inner-step updates for each other agent j != i, then
-    evaluating agent_i's final objective (the 'out_lookahead').
-    Returns (objective, state_hist) or similar.
-    """
-
-    updated_p_working = p_working.copy()
-    updated_v_working = v_working.copy()
+    # Create working copies so that only agent_i’s parameters are differentiable.
+    updated_p_working = list(p_working)
+    updated_v_working = list(v_working)
 
     # 1) For each other agent j != i, run the "inner step" K times
-    #    so that agent j does a proximal update (best response) 
-    #    while everyone else (including i) is fixed.
     for j in range(n_agents):
-        if j == agent_i:
-            continue
-        # inner_steps_plus_update_otheragent is your function that:
-        # - rolls out the environment once,
-        # - computes the objective for agent j,
-        # - includes a KL penalty w.r.t. old params, etc.
-        # - performs K gradient steps updating only p_working[j], v_working[j].
-        key, subkey = jax.random.split(key)
-        updated_p_j, updated_v_j = inner_steps_plus_update_otheragent(
-            subkey,
-            p_working, v_working,
-            p_ref, v_ref, # old references for agent j
-            other_agent=j
+        initial_carry = (key, updated_p_working, updated_v_working)
+
+        def true_fun(carry):
+            # Skip inner step: Create NEW trainstates with inner-loop optimizer.
+            p_j = TrainState.create(
+                apply_fn=p_working[j].apply_fn,
+                params=p_working[j].params,
+                tx=INNER_OPTIMIZER_P
+            )
+            if use_baseline:
+                v_j = TrainState.create(
+                    apply_fn=v_working[j].apply_fn,
+                    params=v_working[j].params,
+                    tx=INNER_OPTIMIZER_V
+                )
+            else:
+                v_j = v_working[j]  # Keep original if no baseline
+
+            # Convert the step field to a JAX array, ensuring both branches have the same type.
+            p_j = p_j.replace(step=jnp.array(p_j.step))
+            if use_baseline:
+                v_j = v_j.replace(step=jnp.array(v_j.step))
+
+            # Instead of using the outer-scope variables, make copies from carry.
+            new_p_working = carry[1].copy()
+            new_v_working = carry[2].copy()
+            new_p_working[j] = p_j
+            new_v_working[j] = v_j
+
+            return carry[0], new_p_working, new_v_working
+
+
+        def false_fun(carry):
+            # Do inner step.
+            updated_p_j, updated_v_j = inner_steps_plus_update_otheragent(
+                carry[0],
+                carry[1], carry[2],
+                p_ref, v_ref,
+                other_agent=j  # j is valid here, it's an argument to a jitted function
+            )[0:2]
+            # Update the working copies *inside* the false_fun
+            new_p_working = carry[1].copy()
+            new_v_working = carry[2].copy()
+            new_p_working[j] = updated_p_j
+            new_v_working[j] = updated_v_j
+
+            return carry[0], new_p_working, new_v_working # Return *updated* lists
+
+        key, updated_p_working, updated_v_working = jax.lax.cond(
+            j == agent_i,
+            true_fun,
+            false_fun,
+            initial_carry
         )
-        # Store the updated TrainState for agent j back into the arrays
-        updated_p_working[j] = updated_p_j
-        updated_v_working[j] = updated_v_j
 
     # 2) Now evaluate the "outer" objective from agent_i's perspective,
     #    given that all opponents j != i have just updated themselves.
