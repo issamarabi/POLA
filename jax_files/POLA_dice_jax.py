@@ -839,15 +839,14 @@ def one_outer_step_objective_selfagent(
 #                  JAX Scan Over Outer Steps (POLA Update)                    #
 ###############################################################################
 
-@jit
-def one_outer_step_update_selfagent(scan_carry, _):
+@partial(jax.jit, static_argnames=("agent_i",))
+def one_outer_step_update_selfagent(scan_carry, _, agent_i):
     """
     Inside a JAX.scan over M=outer_steps, we do:
       1) compute grad of the 'one_outer_step_objective_selfagent'
          wrt agent_i's policy & value parameters,
-      2) apply those grads to p_working[i], v_working[i].
-
-    scan_carry = (key, p_working, v_working, p_ref, v_ref, agent_i)
+      2) apply those grads to the policy & value TrainStates params,
+    scan_carry is a 7-tuple: (key, p_i, v_i, p_working, v_working, p_ref, v_ref)
     """
     
     key, p_i, v_i, p_working, v_working, p_ref, v_ref = scan_carry
@@ -1566,8 +1565,8 @@ def play(key: jnp.ndarray,
         # Loop over all agents (including agent 0) to perform their outer update.
         for agent_i in range(args.n_agents):
             # Make a working copy of the global states
-            p_working = copy_trainstates(trainstates_p)
-            v_working = copy_trainstates(trainstates_v)
+            p_working = tuple(copy_trainstates(trainstates_p))
+            v_working = tuple(copy_trainstates(trainstates_v))
             
             if use_opp_model:
                 key, subkey = jax.random.split(key)
@@ -1577,9 +1576,19 @@ def play(key: jnp.ndarray,
                 v_working[agent_i] = om_v_state
 
             key, subkey = jax.random.split(key)
-            init_scan_state = (subkey, p_working, v_working, p_ref, v_ref, agent_i)
-            final_scan_state, _ = jax.lax.scan(one_outer_step_update_selfagent, init_scan_state, None, args.outer_steps)
-            p_working, v_working = final_scan_state[1], final_scan_state[2]
+            p_i = p_working[agent_i]
+            v_i = v_working[agent_i]
+
+            init_scan_state = (subkey, p_i, v_i, p_working, v_working, p_ref, v_ref)
+
+            final_scan_state, _ = jax.lax.scan(
+                lambda carry, _: one_outer_step_update_selfagent(carry, _, agent_i),
+                init_scan_state,
+                None,
+                args.outer_steps
+            )
+
+            p_working, v_working = final_scan_state[3], final_scan_state[4]
 
             # Overwrite the corresponding agent entry in the global state
             p_after_outer_steps[agent_i] = p_working[agent_i]
