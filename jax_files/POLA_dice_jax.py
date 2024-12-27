@@ -1058,7 +1058,7 @@ def eval_vs_tft(scan_carry, _):
     )
     return scan_carry_next, r_self
 
-@partial(jit, static_argnums=(4,))
+@partial(jit, static_argnums=(3,4))
 def eval_vs_fixed_strategy(key, p_states, v_states, strat="alld", self_agent_idx=0):
     """
     Evaluate agent 'self_agent_idx' vs. a fixed strategy (alld, allc, tft).
@@ -1073,7 +1073,7 @@ def eval_vs_fixed_strategy(key, p_states, v_states, strat="alld", self_agent_idx
 
     # 2) init hidden states
     hidden_p = jnp.array([jnp.zeros((args.batch_size, args.hidden_size)) for _ in range(n_agents)])
-    hidden_v = jnp.array([jnp.zeros((args.batch_size, args.hidden_size)) if use_baseline else None for _ in range(n_agents)], dtype=object)
+    hidden_v = jnp.array([jnp.zeros((args.batch_size, args.hidden_size)) if use_baseline else None for _ in range(n_agents)])
 
     # 3) Build initial scan_carry
     # For TFT, you might need extra fields in the carry, e.g. prev_actions.
