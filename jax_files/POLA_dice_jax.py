@@ -715,7 +715,7 @@ def out_lookahead(key, p_states, v_states, p_ref, v_ref, self_agent):
 
     # Compute the opponents' joint log-probability:
     # Remove self_agent’s log-probs and sum over the others.
-    other_log_probs = jnp.sum(jnp.delete(log_probs_arr, self_agent, axis=2), axis=2)  # [T, batch_size]
+    other_log_probs = jnp.sum(log_probs_arr, axis=2) - agent_log_probs  # [T, batch_size]
 
     # Compute the DiCE+value objective for self_agent.
     objective = dice_objective_plus_value_loss(
