@@ -1459,33 +1459,32 @@ def eval_progress(subkey, p_states, v_states):
     # We build a list, each element is shape [3], then stack => shape [n_agents, 3]
 
     def single_agent_eval(agent_idx, key_eval):
-        """Helper that returns [3] = (score vs alld, score vs allc, score vs tft)."""
+        """Helper that returns a [3] array: (score vs alld, score vs allc, score vs tft)."""
         scores = []
-        # strategies in a known order
-        for strat in ["alld", "allc", "tft"]:
+        # strategies in a fixed order
+        for strat in ["alld", "allc"]:
             key_eval, subkey_eval = jax.random.split(key_eval)
             # eval_vs_fixed_strategy returns a single float (r_self_mean)
             r_self_mean = eval_vs_fixed_strategy(
                 subkey_eval,
-                p_states,     # entire list of policies
-                v_states,     # entire list of value states
+                p_states,     # list of policies
+                v_states,     # list of value states
                 strat=strat,
                 self_agent_idx=agent_idx
             )
             scores.append(r_self_mean)
         return jnp.stack(scores), key_eval
+
+    # Instead of scanning over a traced array of agent indices, we loop in Python:
+    fixed_scores_list = []
+    key_current = key_after_rollout
+    for agent_idx in range(args.n_agents):
+        key_current, subkey = jax.random.split(key_current)
+        scores, key_current = single_agent_eval(agent_idx, subkey)
+        fixed_scores_list.append(scores)
+    fixed_scores = jnp.stack(fixed_scores_list, axis=0)  # shape [n_agents, 3]
     
-    # We'll fold over each agent:
-    def agent_loop(key_in, agent_i):
-        key_in, subkey_in = jax.random.split(key_in)
-        agent_scores, key_out = single_agent_eval(agent_i, subkey_in)
-        return key_out, agent_scores
-    
-    # Run a scan over agent_i=0..(n_agents-1):
-    final_key, fixed_scores = jax.lax.scan(agent_loop, key_after_rollout, jnp.arange(args.n_agents))
-    # fixed_scores_raw is shape [n_agents, 3]
-    
-    # 7) Return our results
+    # 7) Return the results
     return avg_rewards, fixed_scores, coin_info
 
 
