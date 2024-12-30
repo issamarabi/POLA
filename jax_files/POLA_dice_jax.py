@@ -1724,6 +1724,10 @@ if __name__ == "__main__":
     global use_baseline
     use_baseline = not args.no_baseline
 
+    INNER_OPTIMIZER_P = optax.sgd(learning_rate=args.lr_in)
+    INNER_OPTIMIZER_V = optax.sgd(learning_rate=args.lr_v)
+
+
     # Set random seed
     np.random.seed(args.seed)
     key = jax.random.PRNGKey(args.seed)
@@ -1805,6 +1809,5 @@ if __name__ == "__main__":
     play(
         key,
         trainstates_p, trainstates_val,  # List of policy and value TrainStates for all agents
-        trainstates_p, trainstates_val,  # Pass the same lists as 'self' agents (to be handled in 'play')
         use_opp_model=args.opp_model
     )
