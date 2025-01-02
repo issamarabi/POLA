@@ -1,118 +1,61 @@
+"""
+Refactored result_plots.py
+
+This script loads checkpoint data and plots evaluation results for either the coin
+or the IPD environment.
+"""
+
 import jax.numpy as jnp
 import jax.random
+import numpy as np
 from matplotlib import pyplot as plt
 
-import numpy as np
 from POLA_dice_jax import RNN
 from flax.training.train_state import TrainState
 import optax
 from flax.training import checkpoints
 
+# =============================================================================
+# Configuration Parameters
+# =============================================================================
 
-load_dir = "."
-hidden_size = 64
-batch_size = 2000
-lr_out = 0.005
-lr_v = 0.00005
-outer_optim = "adam" # outer optim
-layers_before_gru = 1
-plot_coin = True
+LOAD_DIR = "."
+HIDDEN_SIZE = 64
+BATCH_SIZE = 2000
+LR_OUT = 0.005
+LR_V = 0.00005
+OUTER_OPTIM = "adam"  # "adam" or "sgd"
+LAYERS_BEFORE_GRU = 1
+PLOT_COIN = False  # Set to False to plot IPD results
 
-if plot_coin:
-
-    action_size = 4
-    input_size = 36
-
-    # Example POLA command:
-    # python ./jax_files/POLA_dice_jax.py --env coin  --n_update 302 --gae_lambda 1.0  --inner_steps 2 --outer_steps 200 --lr_in 0.02 --lr_out 0.003 --lr_v 0.0005 --batch_size 2000 --rollout_len 50  --print_every 1 --outer_beta 150 --inner_beta 5 --seed 1 --layers_before_gru 1 --save_dir ./checkpoints/coin/1 --checkpoint_every 25 --hidden_size 64
-    ckpts_pola = [
-        ["checkpoint_2022-09-29_06-31_seed1_epoch76", "checkpoint_2022-09-29_16-05_seed1_epoch201"],
-        ["checkpoint_2022-09-28_20-26_seed2_epoch51", "checkpoint_2022-09-29_16-11_seed2_epoch201"],
-        ["checkpoint_2022-09-28_21-41_seed3_epoch26", "checkpoint_2022-09-29_18-07_seed3_epoch226"],
-        ["checkpoint_2022-09-13_09-05_seed4_epoch101", "checkpoint_2022-09-13_23-24_seed4_epoch126", "checkpoint_2022-09-19_19-19_seed4_epoch26"],
-        ["checkpoint_2022-09-13_09-05_seed5_epoch101", "checkpoint_2022-09-13_23-48_seed5_epoch126", "checkpoint_2022-09-19_21-21_seed5_epoch51"],
-        ["checkpoint_2022-09-13_08-58_seed6_epoch101", "checkpoint_2022-09-14_01-20_seed6_epoch151"],
-        "checkpoint_2022-09-15_17-44_seed7_epoch326",
-        "checkpoint_2022-09-15_19-15_seed8_epoch351",
-        "checkpoint_2022-09-15_14-12_seed9_epoch276",
-        ["checkpoint_2022-09-28_21-41_seed10_epoch26", "checkpoint_2022-09-29_17-56_seed10_epoch226"]
+if PLOT_COIN:
+    ACTION_SIZE = 4
+    INPUT_SIZE = 36
+    # Checkpoint lists for coin environment (each list entry can be a string or a list of strings)
+    CKPTS_POLA = [
+        "checkpoint_2025-02-08_18-41_seed1_epoch100"
     ]
+    CKPTS_LOLA = [
 
-    # Example LOLA command:
-    # python ./jax_files/POLA_dice_jax.py --env coin  --n_update 50001 --gae_lambda 1.0  --inner_steps 1 --outer_steps 1 --lr_in 0.003 --lr_out 0.003 --lr_v 0.0005 --batch_size 2000 --rollout_len 50  --print_every 10 --outer_beta 0 --inner_beta 0 --seed 1 --layers_before_gru 1 --save_dir ./checkpoints/coin/1 --checkpoint_every 2000 --hidden_size 64
-    ckpts_lola = [["checkpoint_2022-10-03_10-34_seed1_epoch30000", "checkpoint_2022-10-03_22-26_seed1_epoch20000"],
-                  ["checkpoint_2022-10-03_09-34_seed2_epoch30000", "checkpoint_2022-10-03_22-15_seed2_epoch20000"],
-                  ["checkpoint_2022-10-03_10-31_seed3_epoch30000", "checkpoint_2022-10-03_22-03_seed3_epoch20000"],
-                  "checkpoint_2022-10-04_06-27_seed4_epoch50000",
-                  "checkpoint_2022-10-04_07-19_seed5_epoch50000",
-                  "checkpoint_2022-10-04_07-35_seed6_epoch50000",
-                  "checkpoint_2022-10-04_06-25_seed7_epoch50000",
-                  "checkpoint_2022-10-04_06-40_seed8_epoch50000",
-                  "checkpoint_2022-10-04_06-23_seed9_epoch50000",
-                  "checkpoint_2022-10-04_06-14_seed10_epoch50000"
-                  ]
-
-
-    # Example POLA OM command:
-    # python ./jax_files/POLA_dice_jax.py --env coin  --n_update 302 --gae_lambda 1.0  --inner_steps 4 --outer_steps 200 --lr_in 0.01 --lr_out 0.003 --lr_v 0.0005 --batch_size 1000 --rollout_len 50  --print_every 1 --outer_beta 150 --inner_beta 10 --seed 7 --layers_before_gru 1 --save_dir ./checkpoints/coin/14 --checkpoint_every 25 --hidden_size 64 --opp_model --opp_model_steps 1 --opp_model_data_batches 200 --om_lr_p 0.005 --om_lr_v 0.0005
-    ckpts_pola_om = [
+        "checkpoint_2022-10-04_06-23_seed9_epoch50000",
+        "checkpoint_2022-10-04_06-14_seed10_epoch50000"
+    ]
+    CKPTS_POLA_OM = [
         "checkpoint_2022-09-20_09-31_seed1_epoch251",
-        "checkpoint_2022-09-20_10-19_seed2_epoch251",
-        "checkpoint_2022-09-30_11-25_seed3_epoch251",
-        "checkpoint_2022-09-30_07-43_seed4_epoch251",
-        ["checkpoint_2022-09-28_22-44_seed5_epoch51", "checkpoint_2022-09-30_12-44_seed5_epoch181", "checkpoint_2022-10-01_05-36_seed5_epoch51"],
-        "checkpoint_2022-09-20_09-22_seed6_epoch251",
-        ["checkpoint_2022-09-18_17-11_seed7_epoch201", "checkpoint_2022-09-19_12-11_seed7_epoch76"],
-        ["checkpoint_2022-09-18_16-44_seed8_epoch201", "checkpoint_2022-09-19_12-07_seed8_epoch76"],
-        ["checkpoint_2022-09-18_16-51_seed9_epoch226", "checkpoint_2022-09-19_21-44_seed9_epoch151"],
         "checkpoint_2022-09-30_07-34_seed10_epoch251"
-        ]
-
+    ]
 else:
-    # PLOT IPD
-
-    action_size = 2
-    input_size = 6
-
-    # python ./jax_files/POLA_dice_jax.py --env ipd  --n_update 151 --gae_lambda 1.0  --inner_steps 2 --outer_steps 200 --lr_in 0.005 --lr_out 0.003 --lr_v 0.0005 --batch_size 2000 --rollout_len 50  --print_every 1 --inner_beta 10 --outer_beta 100 --seed 1 --layers_before_gru 1 --save_dir ./checkpoints/ipd/21 --checkpoint_every 10 --hidden_size 64
-    ckpts_pola = [
-        "checkpoint_2022-10-06_12-06_seed1_epoch150",
-        "checkpoint_2022-10-06_11-50_seed2_epoch150",
-        "checkpoint_2022-10-06_12-12_seed3_epoch150",
-        "checkpoint_2022-10-06_12-04_seed4_epoch150",
-        "checkpoint_2022-10-06_11-48_seed5_epoch150",
-        "checkpoint_2022-10-06_11-56_seed6_epoch150",
-        "checkpoint_2022-10-06_12-12_seed7_epoch150",
-        "checkpoint_2022-10-06_12-04_seed8_epoch150",
+    ACTION_SIZE = 2
+    INPUT_SIZE = 6
+    CKPTS_POLA = [
         "checkpoint_2022-10-06_12-09_seed9_epoch150",
         "checkpoint_2022-10-06_12-07_seed10_epoch150"
     ]
-
-    # python ./jax_files/POLA_dice_jax.py --env ipd  --n_update 20001 --gae_lambda 1.0  --inner_steps 1 --outer_steps 1 --lr_in 0.05 --lr_out 0.003 --lr_v 0.0005 --batch_size 2000 --rollout_len 50  --print_every 10 --outer_beta 0 --inner_beta 0 --seed 6 --layers_before_gru 1 --save_dir ./checkpoints/ipd/51 --checkpoint_every 1000 --hidden_size 64 --contrib_factor 1.33
-    ckpts_lola = [
+    CKPTS_LOLA = [
         "checkpoint_2022-10-05_08-21_seed1_epoch20000",
-        "checkpoint_2022-10-05_08-01_seed2_epoch20000",
-        "checkpoint_2022-10-05_07-59_seed3_epoch20000",
-        "checkpoint_2022-10-05_08-04_seed4_epoch20000",
-        "checkpoint_2022-10-05_08-01_seed5_epoch20000"
-        "checkpoint_2022-10-05_18-52_seed6_epoch20000",
-        "checkpoint_2022-10-05_18-49_seed7_epoch20000",
-        "checkpoint_2022-10-05_18-48_seed8_epoch20000",
-        "checkpoint_2022-10-05_18-43_seed9_epoch20000",
         "checkpoint_2022-10-05_18-50_seed10_epoch20000"
     ]
-
-
-    # python ./jax_files/POLA_dice_jax.py --env ipd  --n_update 151 --gae_lambda 1.0  --inner_steps 2 --outer_steps 200 --lr_in 0.005 --lr_out 0.003 --lr_v 0.0005 --batch_size 2000 --rollout_len 50  --print_every 1 --inner_beta 10 --outer_beta 100 --seed 10 --layers_before_gru 1 --save_dir ./checkpoints/ipd/10 --checkpoint_every 10 --hidden_size 64 --opp_model --opp_model_steps 1 --opp_model_data_batches 200 --om_lr_p 0.005 --om_lr_v 0.0005
-    ckpts_pola_om = [
-        "checkpoint_2022-10-06_13-08_seed1_epoch150",
-        "checkpoint_2022-10-06_13-48_seed2_epoch150",
-        "checkpoint_2022-10-06_13-29_seed3_epoch150",
-        "checkpoint_2022-10-06_13-27_seed4_epoch150",
-        "checkpoint_2022-10-06_13-28_seed5_epoch150",
-        "checkpoint_2022-10-06_13-28_seed6_epoch150",
-        "checkpoint_2022-10-06_13-26_seed7_epoch150",
-        "checkpoint_2022-10-06_13-29_seed8_epoch150",
+    CKPTS_POLA_OM = [
         "checkpoint_2022-10-06_13-27_seed9_epoch150",
         "checkpoint_2022-10-06_13-27_seed10_epoch150"
     ]
