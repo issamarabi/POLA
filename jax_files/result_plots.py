@@ -59,36 +59,44 @@ else:
         "checkpoint_2022-10-06_13-27_seed9_epoch150",
         "checkpoint_2022-10-06_13-27_seed10_epoch150"
     ]
+    CKPTS_STATIC = []  # Not used in IPD
 
-    ckpts_static = []
 
+# =============================================================================
+# Loading Checkpoints and Computing Scores
+# =============================================================================
 
-def load_from_checkpoint(load_dir, load_prefix, action_size, hidden_size, batch_size, input_size, lr_out, lr_v, outer_optim):
+def load_from_checkpoint(load_dir, load_prefix, action_size, hidden_size, batch_size,
+                         input_size, lr_out, lr_v, outer_optim):
+    """
+    Load a checkpoint and initialize the training states and evaluation records.
+    
+    Returns:
+        Tuple (score_record, vs_fixed_strats_score_record, coins_collected_info)
+    """
+    # Extract epoch number from the checkpoint name and adjust if necessary.
     epoch_num = int(load_prefix.split("epoch")[-1])
 
     if epoch_num % 10 == 0:
-        epoch_num += 1 # Kind of an ugly temporary fix to allow for the updated checkpointing system which now has
-        # record of rewards/eval vs fixed strat before the first training - important for IPD plots. Should really be applied to
-        # all checkpoints with the new updated code I have, but the coin checkpoints above are from old code
+        epoch_num += 1  # Temporary fix for checkpointing system with record of eval vs fixed strat pre training
 
-    theta_p1 = RNN(num_outputs=action_size,
-                   num_hidden_units=hidden_size, layers_before_gru=layers_before_gru)
-    theta_v1 = RNN(num_outputs=1, num_hidden_units=hidden_size, layers_before_gru=layers_before_gru)
+    # Initialize models for policy and value functions (for two agents)
+    theta_p1 = RNN(num_outputs=action_size, num_hidden_units=hidden_size,
+                   layers_before_gru=LAYERS_BEFORE_GRU)
+    theta_v1 = RNN(num_outputs=1, num_hidden_units=hidden_size,
+                   layers_before_gru=LAYERS_BEFORE_GRU)
+    theta_p2 = RNN(num_outputs=action_size, num_hidden_units=hidden_size,
+                   layers_before_gru=LAYERS_BEFORE_GRU)
+    theta_v2 = RNN(num_outputs=1, num_hidden_units=hidden_size,
+                   layers_before_gru=LAYERS_BEFORE_GRU)
 
-    theta_p1_params = theta_p1.init(jax.random.PRNGKey(0), jnp.ones(
-        [batch_size, input_size]), jnp.zeros(hidden_size))
-    theta_v1_params = theta_v1.init(jax.random.PRNGKey(0), jnp.ones(
-        [batch_size, input_size]), jnp.zeros(hidden_size))
+    # Initialize parameters with dummy input.
+    theta_p1_params = theta_p1.init(jax.random.PRNGKey(0), jnp.ones([batch_size, input_size]), jnp.zeros(hidden_size))
+    theta_v1_params = theta_v1.init(jax.random.PRNGKey(0), jnp.ones([batch_size, input_size]), jnp.zeros(hidden_size))
+    theta_p2_params = theta_p2.init(jax.random.PRNGKey(0), jnp.ones([batch_size, input_size]), jnp.zeros(hidden_size))
+    theta_v2_params = theta_v2.init(jax.random.PRNGKey(0), jnp.ones([batch_size, input_size]), jnp.zeros(hidden_size))
 
-    theta_p2 = RNN(num_outputs=action_size,
-                   num_hidden_units=hidden_size, layers_before_gru=layers_before_gru)
-    theta_v2 = RNN(num_outputs=1, num_hidden_units=hidden_size, layers_before_gru=layers_before_gru)
-
-    theta_p2_params = theta_p2.init(jax.random.PRNGKey(0), jnp.ones(
-        [batch_size, input_size]), jnp.zeros(hidden_size))
-    theta_v2_params = theta_v2.init(jax.random.PRNGKey(0), jnp.ones(
-        [batch_size, input_size]), jnp.zeros(hidden_size))
-
+    # Set up the outer and value optimizers.
     if outer_optim.lower() == 'adam':
         theta_optimizer = optax.adam(learning_rate=lr_out)
         value_optimizer = optax.adam(learning_rate=lr_v)
@@ -98,56 +106,42 @@ def load_from_checkpoint(load_dir, load_prefix, action_size, hidden_size, batch_
     else:
         raise Exception("Unknown or Not Implemented Optimizer")
 
-    trainstate_th1 = TrainState.create(apply_fn=theta_p1.apply,
-                                       params=theta_p1_params,
-                                       tx=theta_optimizer)
-    trainstate_val1 = TrainState.create(apply_fn=theta_v1.apply,
-                                        params=theta_v1_params,
-                                        tx=value_optimizer)
-    trainstate_th2 = TrainState.create(apply_fn=theta_p2.apply,
-                                       params=theta_p2_params,
-                                       tx=theta_optimizer)
-    trainstate_val2 = TrainState.create(apply_fn=theta_v2.apply,
-                                        params=theta_v2_params,
-                                        tx=value_optimizer)
+    # Create TrainState objects.
+    trainstate_th1 = TrainState.create(apply_fn=theta_p1.apply, params=theta_p1_params, tx=theta_optimizer)
+    trainstate_val1 = TrainState.create(apply_fn=theta_v1.apply, params=theta_v1_params, tx=value_optimizer)
+    trainstate_th2 = TrainState.create(apply_fn=theta_p2.apply, params=theta_p2_params, tx=theta_optimizer)
+    trainstate_val2 = TrainState.create(apply_fn=theta_v2.apply, params=theta_v2_params, tx=value_optimizer)
 
     score_record = [jnp.zeros((2,))] * epoch_num
     vs_fixed_strats_score_record = [[jnp.zeros((3,))] * epoch_num, [jnp.zeros((3,))] * epoch_num]
-    if plot_coin:
-
+    if PLOT_COIN:
         same_colour_coins_record = [jnp.zeros((1,))] * epoch_num
         diff_colour_coins_record = [jnp.zeros((1,))] * epoch_num
     else:
-        same_colour_coins_record = []
-        diff_colour_coins_record = []
-    coins_collected_info = (
-        same_colour_coins_record, diff_colour_coins_record)
+        same_colour_coins_record, diff_colour_coins_record = [], []
+    coins_collected_info = (same_colour_coins_record, diff_colour_coins_record)
 
-    restored_tuple = checkpoints.restore_checkpoint(ckpt_dir=load_dir,
-                                                    target=(trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2,
-                                                                coins_collected_info,
-                                                                score_record,
-                                                                vs_fixed_strats_score_record),
-                                                    prefix=load_prefix)
+    restored_tuple = checkpoints.restore_checkpoint(
+        ckpt_dir=load_dir,
+        target=(trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2,
+                coins_collected_info, score_record, vs_fixed_strats_score_record),
+        prefix=load_prefix
+    )
 
+    (trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2,
+     coins_collected_info, score_record, vs_fixed_strats_score_record) = restored_tuple
 
-    trainstate_th1, trainstate_val1, trainstate_th2, trainstate_val2, coins_collected_info, score_record, vs_fixed_strats_score_record = restored_tuple
-
-    if plot_coin:
+    if PLOT_COIN:
         same_colour_coins_record, diff_colour_coins_record = coins_collected_info
         same_colour_coins_record = jnp.stack(same_colour_coins_record)
         diff_colour_coins_record = jnp.stack(diff_colour_coins_record)
         coins_collected_info = (same_colour_coins_record, diff_colour_coins_record)
 
     score_record = jnp.stack(score_record)
-
     vs_fixed_strats_score_record[0] = jnp.stack(vs_fixed_strats_score_record[0])
     vs_fixed_strats_score_record[1] = jnp.stack(vs_fixed_strats_score_record[1])
 
-
-
-    return score_record, vs_fixed_strats_score_record,  coins_collected_info
-
+    return score_record, vs_fixed_strats_score_record, coins_collected_info
 
 
 def get_prop_same_coins(ckpts, max_iter_plot=200):
