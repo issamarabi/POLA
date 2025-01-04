@@ -145,33 +145,44 @@ def load_from_checkpoint(load_dir, load_prefix, action_size, hidden_size, batch_
 
 
 def get_prop_same_coins(ckpts, max_iter_plot=200):
+    """
+    For each checkpoint, compute the proportion of same-colored coins picked up.
+    
+    Returns:
+        A stacked JAX array of proportions.
+    """
     prop_same_coins_record = []
-    for i in range(len(ckpts)):
-        load_prefix = ckpts[i]
-        score_record, vs_fixed_strats_score_record, coins_collected_info = load_from_checkpoint(load_dir, load_prefix, action_size, hidden_size, batch_size, input_size, lr_out, lr_v, outer_optim)
+    for ckpt in ckpts:
+        score_record, vs_fixed_strats_score_record, coins_collected_info = load_from_checkpoint(
+            LOAD_DIR, ckpt, ACTION_SIZE, HIDDEN_SIZE, BATCH_SIZE, INPUT_SIZE, LR_OUT, LR_V, OUTER_OPTIM
+        )
         same_colour_coins_record, diff_colour_coins_record = coins_collected_info
-        same_colour_coins_record = (same_colour_coins_record[:max_iter_plot])
-        diff_colour_coins_record = (diff_colour_coins_record[:max_iter_plot])
+        same_colour_coins_record = same_colour_coins_record[:max_iter_plot]
+        diff_colour_coins_record = diff_colour_coins_record[:max_iter_plot]
         prop_same_coins = same_colour_coins_record / (same_colour_coins_record + diff_colour_coins_record)
         prop_same_coins_record.append(prop_same_coins)
     return jnp.stack(prop_same_coins_record)
 
 
 def get_score_individual_ckpt(load_dir, load_prefix, w_coin_record=False):
-    score_record, vs_fixed_strats_score_record, coins_collected_info = load_from_checkpoint(load_dir, load_prefix, action_size, hidden_size, batch_size, input_size, lr_out, lr_v, outer_optim)
-
-    agent1_vs_fixed_strat_scores, agent2_vs_fixed_strat_scores = vs_fixed_strats_score_record
-
+    """
+    Load and compute evaluation scores from a single checkpoint.
+    
+    Returns:
+        Tuple (avg_scores, avg_vs_alld, avg_vs_allc, avg_vs_tft, prop_same_coins)
+    """
+    score_record, vs_fixed_strats_score_record, coins_collected_info = load_from_checkpoint(
+        load_dir, load_prefix, ACTION_SIZE, HIDDEN_SIZE, BATCH_SIZE, INPUT_SIZE, LR_OUT, LR_V, OUTER_OPTIM
+    )
+    agent1_vs_fixed_strat, agent2_vs_fixed_strat = vs_fixed_strats_score_record
     avg_scores = score_record.mean(axis=1)
-
-    avg_vs_fixed_strat_scores = (agent1_vs_fixed_strat_scores + agent2_vs_fixed_strat_scores) / 2.
-    avg_vs_alld = avg_vs_fixed_strat_scores[:, 0]
-    avg_vs_allc = avg_vs_fixed_strat_scores[:, 1]
-    avg_vs_tft = avg_vs_fixed_strat_scores[:, 2]
+    avg_vs_fixed = (agent1_vs_fixed_strat + agent2_vs_fixed_strat) / 2.
+    avg_vs_alld = avg_vs_fixed[:, 0]
+    avg_vs_allc = avg_vs_fixed[:, 1]
+    avg_vs_tft = avg_vs_fixed[:, 2]
     if w_coin_record:
-        same_colour_coins_record, diff_colour_coins_record = coins_collected_info
-        prop_same_coins = same_colour_coins_record / (
-                    same_colour_coins_record + diff_colour_coins_record)
+        same_colour_coins, diff_colour_coins = coins_collected_info
+        prop_same_coins = same_colour_coins / (same_colour_coins + diff_colour_coins)
         return avg_scores, avg_vs_alld, avg_vs_allc, avg_vs_tft, prop_same_coins
 
     return avg_scores, avg_vs_alld, avg_vs_allc, avg_vs_tft, None
