@@ -189,54 +189,59 @@ def get_score_individual_ckpt(load_dir, load_prefix, w_coin_record=False):
 
 
 def get_scores(ckpts, max_iter_plot=200, w_coin_record=False):
-    score_record = []
-    avg_vs_alld_record = []
-    avg_vs_allc_record = []
-    avg_vs_tft_record = []
-    if w_coin_record:
-        coin_record = []
-    for i in range(len(ckpts)):
-        ckpts_sublist = ckpts[i]
-        if isinstance(ckpts_sublist, list):
-            score_subrecord = []
-            avg_vs_alld_subrecord = []
-            avg_vs_allc_subrecord = []
-            avg_vs_tft_subrecord = []
-            coin_subrecord = []
-            for ckpt in ckpts_sublist:
-                load_prefix = ckpt
+    """
+    Compute evaluation scores across multiple checkpoints.
+    
+    Parameters:
+        ckpts: List of checkpoint prefixes (or list of lists).
+        max_iter_plot: Maximum number of iterations to include.
+        w_coin_record: Include coin proportion records if True.
+    
+    Returns:
+        Tuple of stacked arrays:
+          (score_record, avg_vs_alld_record, avg_vs_allc_record, avg_vs_tft_record[, coin_record])
+    """
+    score_list, vs_alld_list, vs_allc_list, vs_tft_list = [], [], [], []
+    coin_list = [] if w_coin_record else None
+
+    for ckpt_item in ckpts:
+        if isinstance(ckpt_item, list):
+            score_sub, vs_alld_sub, vs_allc_sub, vs_tft_sub = [], [], [], []
+            coin_sub = [] if w_coin_record else None
+            for ckpt in ckpt_item:
                 avg_scores, avg_vs_alld, avg_vs_allc, avg_vs_tft, prop_same_coins = get_score_individual_ckpt(
-                    load_dir, load_prefix, w_coin_record=w_coin_record)
-                score_subrecord.append(avg_scores)
-                avg_vs_alld_subrecord.append(avg_vs_alld)
-                avg_vs_allc_subrecord.append(avg_vs_allc)
-                avg_vs_tft_subrecord.append(avg_vs_tft)
-                coin_subrecord.append(prop_same_coins)
-            avg_scores = jnp.concatenate(score_subrecord)[:max_iter_plot]
-            avg_vs_alld = jnp.concatenate(avg_vs_alld_subrecord)[:max_iter_plot]
-            avg_vs_allc = jnp.concatenate(avg_vs_allc_subrecord)[:max_iter_plot]
-            avg_vs_tft = jnp.concatenate(avg_vs_tft_subrecord)[:max_iter_plot]
+                    LOAD_DIR, ckpt, w_coin_record=w_coin_record
+                )
+                score_sub.append(avg_scores)
+                vs_alld_sub.append(avg_vs_alld)
+                vs_allc_sub.append(avg_vs_allc)
+                vs_tft_sub.append(avg_vs_tft)
+                if w_coin_record:
+                    coin_sub.append(prop_same_coins)
+            avg_scores = jnp.concatenate(score_sub)[:max_iter_plot]
+            avg_vs_alld = jnp.concatenate(vs_alld_sub)[:max_iter_plot]
+            avg_vs_allc = jnp.concatenate(vs_allc_sub)[:max_iter_plot]
+            avg_vs_tft = jnp.concatenate(vs_tft_sub)[:max_iter_plot]
             if w_coin_record:
-                prop_c = jnp.concatenate(coin_subrecord)[:max_iter_plot]
+                prop_c = jnp.concatenate(coin_sub)[:max_iter_plot]
 
         else:
-            load_prefix = ckpts[i]
-            avg_scores, avg_vs_alld, avg_vs_allc, avg_vs_tft, prop_c = get_score_individual_ckpt(load_dir, load_prefix, w_coin_record=w_coin_record)
-
-        score_record.append(avg_scores[:max_iter_plot])
-        avg_vs_alld_record.append(avg_vs_alld[:max_iter_plot])
-        avg_vs_allc_record.append(avg_vs_allc[:max_iter_plot])
-        avg_vs_tft_record.append(avg_vs_tft[:max_iter_plot])
+            avg_scores, avg_vs_alld, avg_vs_allc, avg_vs_tft, prop_c = get_score_individual_ckpt(
+                LOAD_DIR, ckpt_item, w_coin_record=w_coin_record
+            )
+        score_list.append(avg_scores[:max_iter_plot])
+        vs_alld_list.append(avg_vs_alld[:max_iter_plot])
+        vs_allc_list.append(avg_vs_allc[:max_iter_plot])
+        vs_tft_list.append(avg_vs_tft[:max_iter_plot])
         if w_coin_record:
-            coin_record.append(prop_c[:max_iter_plot])
+            coin_list.append(prop_c[:max_iter_plot])
 
-
-    score_record = jnp.stack(score_record)
-    avg_vs_alld_record = jnp.stack(avg_vs_alld_record)
-    avg_vs_allc_record = jnp.stack(avg_vs_allc_record)
-    avg_vs_tft_record = jnp.stack(avg_vs_tft_record)
+    score_record = jnp.stack(score_list)
+    avg_vs_alld_record = jnp.stack(vs_alld_list)
+    avg_vs_allc_record = jnp.stack(vs_allc_list)
+    avg_vs_tft_record = jnp.stack(vs_tft_list)
     if w_coin_record:
-        coin_record = jnp.stack(coin_record)
+        coin_record = jnp.stack(coin_list)
         return score_record, avg_vs_alld_record, avg_vs_allc_record, avg_vs_tft_record, coin_record
 
     return score_record, avg_vs_alld_record, avg_vs_allc_record, avg_vs_tft_record
