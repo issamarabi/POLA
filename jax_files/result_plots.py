@@ -247,35 +247,35 @@ def get_scores(ckpts, max_iter_plot=200, w_coin_record=False):
     return score_record, avg_vs_alld_record, avg_vs_allc_record, avg_vs_tft_record
 
 
-def plot_coins_record(ckpts, max_iter_plot, label, z_score=1.96, skip_step=0):
+# =============================================================================
+# Plotting Functions
+# =============================================================================
 
-    prop_same_coins_record = get_prop_same_coins(ckpts, max_iter_plot=max_iter_plot)
-
-    plot_with_conf_bounds(prop_same_coins_record, max_iter_plot, len(ckpts), label, skip_step,
-                          z_score)
-
-def plot_with_conf_bounds(record, max_iter_plot, num_ckpts, label, skip_step, z_score, use_ax=False, ax=None, linestyle='solid'):
+def plot_with_conf_bounds(record, max_iter_plot, num_ckpts, label, skip_step, z_score=1.96, ax=None, linestyle='solid'):
+    """
+    Plot the average curve with shaded confidence bounds.
+    
+    Parameters:
+        record: Array with shape (num_ckpts, iterations).
+        max_iter_plot: Number of iterations to plot.
+        num_ckpts: Number of checkpoints (used for confidence interval).
+        label: Legend label.
+        skip_step: Factor to scale the x-axis.
+        z_score: Z-value for confidence bounds.
+        ax: matplotlib Axes (if None, uses plt).
+        linestyle: Line style.
+    """
     avg = record.mean(axis=0)
-
     stdev = jnp.std(record, axis=0)
+    conf = z_score * stdev / np.sqrt(num_ckpts)
+    x_vals = np.arange(max_iter_plot) * skip_step
 
-    upper_conf_bound = avg + z_score * stdev / np.sqrt(
-        num_ckpts)
-    lower_conf_bound = avg - z_score * stdev / np.sqrt(
-        num_ckpts)
-
-    if use_ax:
-        assert ax is not None
-        ax.plot(np.arange(max_iter_plot) * skip_step, avg,
-             label=label, linestyle=linestyle)
-        ax.fill_between(np.arange(max_iter_plot) * skip_step, lower_conf_bound,
-                     upper_conf_bound, alpha=0.3)
-
+    if ax is not None:
+        ax.plot(x_vals, avg, label=label, linestyle=linestyle)
+        ax.fill_between(x_vals, avg - conf, avg + conf, alpha=0.3)
     else:
-        plt.plot(np.arange(max_iter_plot) * skip_step, avg,
-                 label=label)
-        plt.fill_between(np.arange(max_iter_plot) * skip_step, lower_conf_bound,
-                         upper_conf_bound, alpha=0.3)
+        plt.plot(x_vals, avg, label=label, linestyle=linestyle)
+        plt.fill_between(x_vals, avg - conf, avg + conf, alpha=0.3)
 
 
 def setup_ipd_plots(titles):
