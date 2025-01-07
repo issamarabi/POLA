@@ -279,14 +279,21 @@ def plot_with_conf_bounds(record, max_iter_plot, num_ckpts, label, skip_step, z_
 
 
 def setup_ipd_plots(titles):
+    """
+    Create subplots for IPD results.
+    
+    Parameters:
+        titles: List of titles for each subplot.
+    
+    Returns:
+        (fig, axs): Figure and array of Axes.
+    """
     nfigs = len(titles)
-    fig, axs = plt.subplots(1, nfigs, figsize=(5 * (nfigs) + 3, 4))
-
-    for i in range(nfigs):
-        axs[i].set_title(titles[i])
-        axs[i].set_xlabel("Total Number of Outer Steps")
-        axs[i].set_ylabel("Score (Average over Agents and Rollout Length)")
-
+    fig, axs = plt.subplots(1, nfigs, figsize=(5 * nfigs + 3, 4))
+    for ax, title in zip(axs, titles):
+        ax.set_title(title)
+        ax.set_xlabel("Total Number of Outer Steps")
+        ax.set_ylabel("Score (Average over Agents and Rollout Length)")
     return fig, axs
 
 def setup_coin_plots(titles):
