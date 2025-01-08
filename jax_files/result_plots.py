@@ -297,18 +297,24 @@ def setup_ipd_plots(titles):
     return fig, axs
 
 def setup_coin_plots(titles):
+    """
+    Create subplots for coin environment results.
+    
+    Parameters:
+        titles: List of subplot titles.
+    
+    Returns:
+        (fig, axs): Figure and array of Axes.
+    """
     nfigs = len(titles)
-    fig, axs = plt.subplots(1, nfigs, figsize=(4 * (nfigs) + 6, 4))
-
+    fig, axs = plt.subplots(1, nfigs, figsize=(4 * nfigs + 6, 4))
     axs[0].set_title(titles[0])
     axs[0].set_xlabel("Total Number of Outer Steps")
     axs[0].set_ylabel("Proportion of Same Coins Picked Up")
-
-    for i in range(1, nfigs):
-        axs[i].set_title(titles[i])
-        axs[i].set_xlabel("Total Number of Outer Steps")
-        axs[i].set_ylabel("Score (Average over Agents and Rollout Length)")
-
+    for ax, title in zip(axs[1:], titles[1:]):
+        ax.set_title(title)
+        ax.set_xlabel("Total Number of Outer Steps")
+        ax.set_ylabel("Score (Average over Agents and Rollout Length)")
     return fig, axs
 
 def plot_ipd_results(axs, ckpts, nfigs, max_iter_plot, label, z_score=1.96, skip_step=0, linestyle='solid'):
