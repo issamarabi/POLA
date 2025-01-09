@@ -317,17 +317,18 @@ def setup_coin_plots(titles):
         ax.set_ylabel("Score (Average over Agents and Rollout Length)")
     return fig, axs
 
-def plot_ipd_results(axs, ckpts, nfigs, max_iter_plot, label, z_score=1.96, skip_step=0, linestyle='solid'):
-
-    score_record, avg_vs_alld_record, avg_vs_allc_record, avg_vs_tft_record = \
-        get_scores(ckpts, max_iter_plot=max_iter_plot)
-
-    plot_tup = (score_record, avg_vs_alld_record, avg_vs_allc_record, avg_vs_tft_record)
-
-    for i in range(nfigs):
-        plot_with_conf_bounds(plot_tup[i], max_iter_plot, len(ckpts), label,
-                              skip_step, z_score, use_ax=True, ax=axs[i], linestyle=linestyle)
-        axs[i].legend()
+def plot_ipd_results(axs, ckpts, max_iter_plot, label, skip_step, z_score=1.96, linestyle='solid'):
+    """
+    Plot IPD evaluation results on the given axes.
+    """
+    score_record, avg_vs_alld_record, avg_vs_allc_record, avg_vs_tft_record = get_scores(ckpts, max_iter_plot=max_iter_plot)
+    plot_data = (score_record, avg_vs_alld_record, avg_vs_allc_record, avg_vs_tft_record)
+    for i, ax in enumerate(axs):
+        # For this example, we plot different measures on different subplots.
+        # Adjust which measure is plotted as needed.
+        data = plot_data[i] if i < len(plot_data) else plot_data[-1]
+        plot_with_conf_bounds(data, max_iter_plot, len(ckpts), label, skip_step, z_score, ax=ax, linestyle=linestyle)
+        ax.legend()
 
 def plot_coin_results(axs, ckpts, nfigs, max_iter_plot, label, z_score=1.96, skip_step=0, linestyle='solid'):
 
