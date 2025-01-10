@@ -330,18 +330,16 @@ def plot_ipd_results(axs, ckpts, max_iter_plot, label, skip_step, z_score=1.96, 
         plot_with_conf_bounds(data, max_iter_plot, len(ckpts), label, skip_step, z_score, ax=ax, linestyle=linestyle)
         ax.legend()
 
-def plot_coin_results(axs, ckpts, nfigs, max_iter_plot, label, z_score=1.96, skip_step=0, linestyle='solid'):
-
-    score_record, avg_vs_alld_record, avg_vs_allc_record, avg_vs_tft_record, prop_same_coins_record = \
-        get_scores(ckpts, max_iter_plot=max_iter_plot, w_coin_record=True)
-
-    plot_tup = (prop_same_coins_record, score_record, avg_vs_alld_record, avg_vs_allc_record, avg_vs_tft_record)
-
-    for i in range(nfigs):
-        plot_with_conf_bounds(plot_tup[i], max_iter_plot, len(ckpts), label,
-                              skip_step, z_score, use_ax=True, ax=axs[i], linestyle=linestyle)
-        axs[i].legend()
-
+def plot_coin_results(axs, ckpts, max_iter_plot, label, skip_step, z_score=1.96, linestyle='solid'):
+    """
+    Plot coin environment evaluation results on the given axes.
+    """
+    (score_record, avg_vs_alld_record, avg_vs_allc_record,
+     avg_vs_tft_record, prop_same_coins_record) = get_scores(ckpts, max_iter_plot=max_iter_plot, w_coin_record=True)
+    plot_data = (prop_same_coins_record, score_record, avg_vs_alld_record, avg_vs_allc_record, avg_vs_tft_record)
+    for i, ax in enumerate(axs):
+        plot_with_conf_bounds(plot_data[i], max_iter_plot, len(ckpts), label, skip_step, z_score, ax=ax, linestyle=linestyle)
+        ax.legend()
 
 
 if plot_coin:
