@@ -342,69 +342,63 @@ def plot_coin_results(axs, ckpts, max_iter_plot, label, skip_step, z_score=1.96,
         ax.legend()
 
 
-if plot_coin:
-    pola_max_iters = 250 # epochs/n_update
-    pola_skip_step = 200 # outer steps
-    pola_om_max_iters = pola_max_iters
-    pola_om_skip_step = pola_skip_step
-    lola_skip_step = 1 # outer steps
-    lola_max_iters = pola_max_iters * pola_skip_step // lola_skip_step
+# =============================================================================
+# Main Plotting Routine
+# =============================================================================
 
-    # titles = ("Proportion of Same Coins Picked Up", "Average Score vs Each Other", "Average Score vs Always Defect", "Average Score vs Always Cooperate", "Average Score vs TFT")
-    titles = ("Proportion of Same Coins Picked Up", "Average Score vs Each Other", "Average Score vs Always Defect")
-    fig, axs = setup_coin_plots(titles)
+def main():
+    if PLOT_COIN:
+        # Parameters for coin environment plots.
+        pola_max_iters = 250   # Number of iterations (epochs)
+        pola_skip_step = 200   # Outer steps interval
+        pola_om_max_iters = pola_max_iters
+        pola_om_skip_step = pola_skip_step
+        lola_skip_step = 1
+        lola_max_iters = pola_max_iters * pola_skip_step // lola_skip_step
 
-    # POLA is 200 skip step because 1 inner 1 outer, 100 times = 200 env rollouts per epoch per agent
-    plot_coin_results(axs, ckpts_pola, nfigs=len(titles), max_iter_plot=pola_max_iters, skip_step=pola_skip_step, label="POLA-DiCE", linestyle='dashed')
+        titles = ("Proportion of Same Coins Picked Up", "Average Score vs Each Other", "Average Score vs Always Defect")
+        fig, axs = setup_coin_plots(titles)
 
-    # LOLA is 2 skip step because 1 inner 1 outer, 1 time = 2 env rollouts per epoch per agent
-    plot_coin_results(axs, ckpts_lola, nfigs=len(titles), max_iter_plot=lola_max_iters, skip_step=lola_skip_step, label="LOLA-DiCE", linestyle='solid')
+        # Plot results for different methods.
+        plot_coin_results(axs, CKPTS_POLA, pola_max_iters, label="POLA-DiCE", skip_step=pola_skip_step, linestyle='dashed')
+        plot_coin_results(axs, CKPTS_LOLA, lola_max_iters, label="LOLA-DiCE", skip_step=lola_skip_step, linestyle='solid')
+        plot_coin_results(axs, CKPTS_POLA_OM, pola_om_max_iters, label="POLA-OM", skip_step=pola_om_skip_step, linestyle='dotted')
 
-    # For OM I'm not counting the env rollouts used for the OM data collection
-    plot_coin_results(axs, ckpts_pola_om, nfigs=len(titles), max_iter_plot=pola_om_max_iters, skip_step=pola_om_skip_step, label="POLA-OM", linestyle='dotted')
+        # Add reference lines.
+        x_vals = np.arange(pola_max_iters) * pola_skip_step
+        axs[0].plot(x_vals, np.ones_like(x_vals), label="Always Cooperate", linestyle=((0, (3, 1, 1, 1, 1, 1))))
+        axs[0].plot(x_vals, 0.5 * np.ones_like(x_vals), label="Always Defect", linestyle='dashdot')
+        axs[1].plot(x_vals, (1. / 3.) * np.ones_like(x_vals), label="Always Cooperate", linestyle=((0, (3, 1, 1, 1, 1, 1))))
+        axs[1].plot(x_vals, np.zeros_like(x_vals), label="Always Defect", linestyle='dashdot')
+        axs[2].plot(x_vals, -0.26 * np.ones_like(x_vals), label="Always Cooperate", linestyle=((0, (3, 1, 1, 1, 1, 1))))
+        axs[2].plot(x_vals, np.zeros_like(x_vals), label="Always Defect", linestyle='dashdot')
+        for ax in axs:
+            ax.legend()
+    else:
+        # Parameters for IPD environment plots.
+        pola_max_iters = 100
+        pola_skip_step = 200
+        lola_skip_step = 1
+        lola_max_iters = pola_max_iters * pola_skip_step // lola_skip_step
 
+        titles = ("Average Score vs Each Other", "Average Score vs Always Defect")
+        fig, axs = setup_ipd_plots(titles)
 
-    # Agents who always cooperate only pick up their own coins, and a coin is picked up on average every 1.5 time steps, so 3 time steps for each agent to pick up a coin, so the maximum expected reward is 1/3 per time step. If you always cooperate against an always defect agent, a coin is picked up on average every 1.5 time steps, but the cooperative agent gets 0 reward half of the time, and for the remaining 25 time steps, the coop agent competes with the always defect agent. If both pick up coin, coop agent gets -1, if coop wins race, coop gets 1, if coop loses coop gets -2. 50% of the time, equal distance, so coop gets -1, then 50% of the time it's a race with expected value -0.5. So average -0.75. So 25 time steps every 1.5 steps you get -0.75. So on 16.666 coins you get -0.75 which is 12.5, then /50 you get -0.25 average. Empirically I find it is -0.26. I think the reasoning is not exactly correct because of the possibility of 2 agents being on the same space.
-    x_vals = np.arange(pola_max_iters) * pola_skip_step
-    axs[0].plot(x_vals, 1. * np.ones_like(x_vals), label="Always Cooperate",
-                linestyle=((0, (3, 1, 1, 1, 1, 1))))
-    axs[0].plot(x_vals, 0.5 * np.ones_like(x_vals), label="Always Defect",
-                linestyle='dashdot')
-    axs[1].plot(x_vals, 1. / 3. * np.ones_like(x_vals), label="Always Cooperate",
-                linestyle=((0, (3, 1, 1, 1, 1, 1))))
-    axs[1].plot(x_vals, 0 * np.ones_like(x_vals), label="Always Defect",
-                linestyle='dashdot')
-    axs[2].plot(x_vals, -0.26 * np.ones_like(x_vals), label="Always Cooperate",
-                linestyle=((0, (3, 1, 1, 1, 1, 1))))
-    axs[2].plot(x_vals, 0 * np.ones_like(x_vals), label="Always Defect",
-                linestyle='dashdot')
-    axs[0].legend()
-    axs[1].legend()
-    axs[2].legend()
+        plot_ipd_results(axs, CKPTS_POLA, pola_max_iters, label="POLA-DiCE", skip_step=pola_skip_step, linestyle='dashed')
+        plot_ipd_results(axs, CKPTS_LOLA, lola_max_iters, label="LOLA-DiCE", skip_step=lola_skip_step, linestyle='solid')
+        plot_ipd_results(axs, CKPTS_POLA_OM, pola_max_iters, label="POLA-OM", skip_step=pola_skip_step, linestyle='dotted')
 
-else:
-    pola_max_iters = 100 # epochs/n_update
-    pola_skip_step = 200 # outer steps
-    lola_skip_step = 1 # outer steps
-    lola_max_iters = pola_max_iters * pola_skip_step // lola_skip_step
+        x_vals = np.arange(pola_max_iters) * pola_skip_step
+        axs[0].plot(x_vals, 0.33 * np.ones_like(x_vals), label="Always Cooperate", linestyle=((0, (3, 1, 1, 1, 1, 1))))
+        axs[0].plot(x_vals, np.zeros_like(x_vals), label="Always Defect", linestyle='dashdot')
+        axs[1].plot(x_vals, -0.335 * np.ones_like(x_vals), label="Always Cooperate", linestyle=((0, (3, 1, 1, 1, 1, 1))))
+        axs[1].plot(x_vals, np.zeros_like(x_vals), label="Always Defect", linestyle='dashdot')
+        for ax in axs:
+            ax.legend()
 
-    # titles = ("Average Score vs Each Other", "Average Score vs Always Defect", "Average Score vs Always Cooperate", "Average Score vs TFT")
-    titles = ("Average Score vs Each Other", "Average Score vs Always Defect")
-    fig, axs = setup_ipd_plots(titles)
-
-    plot_ipd_results(axs, ckpts_pola, nfigs=len(titles), max_iter_plot=pola_max_iters, skip_step=pola_skip_step, label="POLA-DiCE", linestyle='dashed')
-    plot_ipd_results(axs, ckpts_lola, nfigs=len(titles), max_iter_plot=lola_max_iters, skip_step=lola_skip_step, label="LOLA-DiCE", linestyle='solid')
-    plot_ipd_results(axs, ckpts_pola_om, nfigs=len(titles), max_iter_plot=pola_max_iters, skip_step=pola_skip_step, label="POLA-OM", linestyle='dotted')
-
-    x_vals = np.arange(pola_max_iters) * pola_skip_step
-    axs[0].plot(x_vals, 0.33 * np.ones_like(x_vals), label="Always Cooperate", linestyle=((0, (3, 1, 1, 1, 1, 1))))
-    axs[0].plot(x_vals, 0 * np.ones_like(x_vals), label="Always Defect", linestyle='dashdot')
-    axs[1].plot(x_vals, -0.335 * np.ones_like(x_vals) , label="Always Cooperate", linestyle=((0, (3, 1, 1, 1, 1, 1))))
-    axs[1].plot(x_vals, 0 * np.ones_like(x_vals), label="Always Defect", linestyle='dashdot')
-    axs[0].legend()
-    axs[1].legend()
+    plt.show()
+    fig.savefig('fig.png')
 
 
-plt.show()
-
-fig.savefig('fig.png')
+if __name__ == '__main__':
+    main()
