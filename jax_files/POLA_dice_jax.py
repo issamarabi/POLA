@@ -2,16 +2,18 @@ import numpy as np
 import argparse
 import datetime
 import itertools
+import os
 
 import jax
 from jax import jit
+import jax.numpy as jnp
 import optax
 from functools import partial
 
 from flax import linen as nn
-import jax.numpy as jnp
 from flax.training.train_state import TrainState
-from flax.training import checkpoints
+from flax.training import orbax_utils
+import orbax.checkpoint
 
 from tensorflow_probability.substrates import jax as tfp
 tfd = tfp.distributions
@@ -1617,13 +1619,29 @@ def play(key: jnp.ndarray,
         # Save checkpoint if required
         if (update_idx + 1) % args.checkpoint_every == 0:
             now = datetime.datetime.now()
-            checkpoints.save_checkpoint(
-                ckpt_dir=args.save_dir,
-                target=(p_after_outer_steps, v_after_outer_steps, score_record, vs_fixed_strats_score_record),
-                step=update_idx + 1,
-                prefix=f"checkpoint_{now.strftime('%Y-%m-%d_%H-%M')}_seed{args.seed}_epoch"
+            checkpoint_name = f"checkpoint_{now.strftime('%Y-%m-%d_%H-%M')}_seed{args.seed}_epoch{update_idx + 1}"
+            
+            # Create checkpointer
+            checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+            
+            # Prepare the save data
+            save_data = {
+                'trainstates_p': p_after_outer_steps,
+                'trainstates_val': v_after_outer_steps,
+                'score_record': jnp.array(score_record),  # Convert list to array if it isn't already
+                'vs_fixed_strats_score_record': jnp.array(vs_fixed_strats_score_record)
+            }
+            
+            # Convert to Orbax-compatible format
+            save_args = orbax_utils.save_args_from_target(save_data)
+            
+            # Save the checkpoint
+            checkpointer.save(
+                os.path.join(args.save_dir, checkpoint_name),
+                save_data,
+                save_args=save_args
             )
-
+    
     return score_record, vs_fixed_strats_score_record
 
 
