@@ -1783,45 +1783,31 @@ if __name__ == "__main__":
         except (IndexError, ValueError):
             raise ValueError("Failed to extract epoch number from load_prefix. Ensure it contains 'epoch<NUMBER>'.")
 
-        # Apply the same adjustment as the original code
-        if epoch_num % 10 == 0:
-            epoch_num += 1  # Temporary fix as per original code comments
+        # Create Orbax checkpointer
+        checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+        
+        # Create the target structure matching EXACTLY what was saved
+        target = {
+            'trainstates_p': trainstates_p,
+            'trainstates_val': trainstates_val,
+            'score_record': jnp.zeros((epoch_num + 1, args.n_agents)),  # +1 because we save initial scores
+            'vs_fixed_strats_score_record': jnp.zeros((epoch_num + 1, args.n_agents, 2))  # shape matches eval_vs_fixed_strategy output
+        }
 
-        # Initialize records based on number of agents
-        score_record = [jnp.zeros((args.n_agents,))] * epoch_num
-        vs_fixed_strats_score_record = [
-            [jnp.zeros((3,))] * epoch_num for _ in range(args.n_agents)
-        ]
-
-        # Initialize coins_collected_info based on environment
-        if args.env == 'coin':
-            coins_collected_info = (
-                [jnp.zeros((1,))] * epoch_num,
-                [jnp.zeros((1,))] * epoch_num
-            )
-        else:
-            coins_collected_info = ([], [])
-
-        # Restore checkpoint
-        restored_tuple = checkpoints.restore_checkpoint(
-            ckpt_dir=args.load_dir,
-            target=(
-                *trainstates_p, *trainstates_val,
-                coins_collected_info,
-                score_record,
-                vs_fixed_strats_score_record
-            ),
-            step=epoch_num,
-            prefix=args.load_prefix
+        # Convert to Orbax-compatible format
+        save_args = orbax_utils.save_args_from_target(target)
+        
+        # Restore the checkpoint
+        restored_data = checkpointer.restore(
+            args.load_dir + '/' + args.load_prefix,
+            item=target
         )
 
-        # Unpack the restored data
-        # Assuming the order matches the initialization
-        trainstates_p = list(restored_tuple[:args.n_agents])
-        trainstates_val = list(restored_tuple[args.n_agents:2 * args.n_agents])
-        coins_collected_info = restored_tuple[2 * args.n_agents]
-        score_record = restored_tuple[2 * args.n_agents + 1]
-        vs_fixed_strats_score_record = restored_tuple[2 * args.n_agents + 2]
+        # Update our variables
+        trainstates_p = restored_data['trainstates_p']
+        trainstates_val = restored_data['trainstates_val']
+        score_record = restored_data['score_record']
+        vs_fixed_strats_score_record = restored_data['vs_fixed_strats_score_record']
 
     # Finally, run the main training loop
     play(
